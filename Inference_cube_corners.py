@@ -97,6 +97,83 @@ def safe_mask_to_bool(mask):
     return mask_np.astype(bool)
 
 
+def optimize_parallelogram_fit(points, mask_np):
+    """优化平行四边形拟合，使其更符合立方体面的特征"""
+    if len(points) < 4:
+        return None
+    
+    # 使用最小外接矩形作为初始估计
+    rect = cv2.minAreaRect(points)
+    initial_box = cv2.boxPoints(rect)
+    initial_box = np.int0(initial_box)
+    
+    # 计算矩形的面积和角度
+    rect_area = cv2.contourArea(initial_box)
+    mask_area = np.sum(mask_np)
+    
+    # 计算拟合质量（掩码面积与矩形面积的比例）
+    fit_quality = mask_area / rect_area if rect_area > 0 else 0
+    
+    # 如果拟合质量太差，尝试其他方法
+    if fit_quality < 0.6:
+        # 尝试使用凸包
+        try:
+            hull = ConvexHull(points)
+            hull_points = points[hull.vertices]
+            
+            # 如果凸包点数等于4，直接使用
+            if len(hull_points) == 4:
+                return hull_points
+            elif len(hull_points) > 4:
+                # 选择最接近矩形的4个点
+                hull_points = select_best_rectangle_points(hull_points)
+                return hull_points
+        except:
+            pass
+    
+    return initial_box
+
+
+def select_best_rectangle_points(points):
+    """从多个点中选择最接近矩形的4个点"""
+    if len(points) <= 4:
+        return points[:4]
+    
+    # 计算所有可能的4点组合
+    from itertools import combinations
+    best_points = None
+    best_score = float('inf')
+    
+    for combo in combinations(points, 4):
+        combo = np.array(combo)
+        
+        # 计算角度偏差
+        angles = []
+        for i in range(4):
+            pt1 = combo[i]
+            pt2 = combo[(i+1) % 4]
+            pt3 = combo[(i+2) % 4]
+            
+            vec1 = pt2 - pt1
+            vec2 = pt3 - pt2
+            
+            dot_product = np.dot(vec1, vec2)
+            norms = np.linalg.norm(vec1) * np.linalg.norm(vec2)
+            if norms > 0:
+                cos_angle = dot_product / norms
+                cos_angle = np.clip(cos_angle, -1, 1)
+                angle = np.arccos(cos_angle) * 180 / np.pi
+                angles.append(abs(angle - 90))
+        
+        if len(angles) == 4:
+            score = np.mean(angles)  # 角度偏差的平均值
+            if score < best_score:
+                best_score = score
+                best_points = combo
+    
+    return best_points if best_points is not None else points[:4]
+
+
 def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
     """基于几何特征和深度信息筛选立方体分割"""
     filtered_annotations = []
@@ -116,14 +193,67 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
         y_coords, x_coords = np.where(mask_np)
         if len(y_coords) == 0:
             continue
-            
-        bbox = [np.min(x_coords), np.min(y_coords), np.max(x_coords), np.max(y_coords)]
-        width = bbox[2] - bbox[0]
-        height = bbox[3] - bbox[1]
         
-        # 检查宽高比（立方体应该有合理的宽高比）
-        aspect_ratio = width / height
-        if aspect_ratio < 0.5 or aspect_ratio > 2.0:
+        # 使用优化的平行四边形拟合
+        points = np.column_stack((x_coords, y_coords))
+        if len(points) < 4:
+            continue
+            
+        try:
+            # 使用优化的平行四边形拟合
+            bbox_points = optimize_parallelogram_fit(points, mask_np)
+            if bbox_points is None:
+                continue
+            
+            # 按顺时针顺序排列角点
+            center = np.mean(bbox_points, axis=0)
+            angles = np.arctan2(bbox_points[:, 1] - center[1], bbox_points[:, 0] - center[0])
+            sorted_indices = np.argsort(angles)
+            bbox_points = bbox_points[sorted_indices]
+            
+            # 计算平行四边形的边长
+            edges = []
+            for i in range(4):
+                pt1 = bbox_points[i]
+                pt2 = bbox_points[(i+1) % 4]
+                edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
+                edges.append(edge_length)
+            
+            # 计算宽高比（使用对边的平均值）
+            width = (edges[0] + edges[2]) / 2  # 对边平均
+            height = (edges[1] + edges[3]) / 2  # 对边平均
+            
+            # 检查宽高比（立方体应该有合理的宽高比）
+            aspect_ratio = width / height
+            if aspect_ratio < 0.5 or aspect_ratio > 2.0:
+                continue
+                
+            # 计算角度（检查是否接近矩形）
+            angles_deg = []
+            for i in range(4):
+                pt1 = bbox_points[i]
+                pt2 = bbox_points[(i+1) % 4]
+                pt3 = bbox_points[(i+2) % 4]
+                
+                # 计算两个向量
+                vec1 = pt2 - pt1
+                vec2 = pt3 - pt2
+                
+                # 计算角度
+                dot_product = np.dot(vec1, vec2)
+                norms = np.linalg.norm(vec1) * np.linalg.norm(vec2)
+                if norms > 0:
+                    cos_angle = dot_product / norms
+                    cos_angle = np.clip(cos_angle, -1, 1)  # 避免数值误差
+                    angle = np.arccos(cos_angle) * 180 / np.pi
+                    angles_deg.append(angle)
+            
+            # 检查角度是否接近90度（允许一定误差）
+            angle_deviation = np.mean([abs(angle - 90) for angle in angles_deg])
+            if angle_deviation > 30:  # 允许30度的角度偏差
+                continue
+                
+        except:
             continue
         
         # 计算深度统计信息
@@ -155,60 +285,72 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
         except:
             continue
         
+        # 评估拟合质量
+        quality_metrics = evaluate_fitting_quality(mask_np, bbox_points)
+        
         # 添加到筛选结果
-        annotation['bbox'] = bbox
+        annotation['bbox'] = bbox_points.tolist()  # 使用拟合的平行四边形顶点
         annotation['area'] = area
         annotation['aspect_ratio'] = aspect_ratio
+        annotation['angle'] = angle_deviation  # 角度偏差
         annotation['depth_mean'] = depth_mean
         annotation['depth_std'] = depth_std
         annotation['solidity'] = solidity
+        annotation['edges'] = edges  # 保存边长信息
+        annotation['quality_metrics'] = quality_metrics  # 保存质量评估结果
         filtered_annotations.append(annotation)
     
     return filtered_annotations
 
 
-def find_cube_corners(mask, depth_img, visualize=True):
+def find_cube_corners(mask, depth_img, bbox_points=None, visualize=True):
     """找到立方体上立面的四个角点"""
     # 确保mask是numpy数组
     mask_np = safe_mask_to_numpy(mask)
     
-    # 获取掩码边界
-    y_coords, x_coords = np.where(mask_np)
-    if len(y_coords) < 4:
-        return None, None
-    
-    points = np.column_stack((x_coords, y_coords))
-    
-    # 使用凸包找到边界点
-    try:
-        hull = ConvexHull(points)
-        hull_points = points[hull.vertices]
-    except:
-        return None, None
-    
-    # 如果凸包点数不等于4，尝试找到最接近矩形的4个点
-    if len(hull_points) != 4:
-        # 计算最小外接矩形
-        rect = cv2.minAreaRect(hull_points)
-        box = cv2.boxPoints(rect)
-        box = np.int0(box)
-        hull_points = box
-    
-    # 按顺时针顺序排列角点
-    hull_points = np.array(hull_points)
-    center = np.mean(hull_points, axis=0)
-    angles = np.arctan2(hull_points[:, 1] - center[1], hull_points[:, 0] - center[0])
-    sorted_indices = np.argsort(angles)
-    hull_points = hull_points[sorted_indices]
+    # 如果提供了边界框点，直接使用
+    if bbox_points is not None:
+        corners = bbox_points.tolist()
+    else:
+        # 获取掩码边界
+        y_coords, x_coords = np.where(mask_np)
+        if len(y_coords) < 4:
+            return None, None
+        
+        points = np.column_stack((x_coords, y_coords))
+        
+        # 使用凸包找到边界点
+        try:
+            hull = ConvexHull(points)
+            hull_points = points[hull.vertices]
+        except:
+            return None, None
+        
+        # 如果凸包点数不等于4，尝试找到最接近矩形的4个点
+        if len(hull_points) != 4:
+            # 计算最小外接矩形
+            rect = cv2.minAreaRect(hull_points)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            hull_points = box
+        
+        # 按顺时针顺序排列角点
+        hull_points = np.array(hull_points)
+        center = np.mean(hull_points, axis=0)
+        angles = np.arctan2(hull_points[:, 1] - center[1], hull_points[:, 0] - center[0])
+        sorted_indices = np.argsort(angles)
+        hull_points = hull_points[sorted_indices]
+        
+        corners = hull_points.tolist()
     
     # 验证角点
-    corners = []
-    for point in hull_points:
+    valid_corners = []
+    for point in corners:
         x, y = int(point[0]), int(point[1])
         if 0 <= x < depth_img.shape[1] and 0 <= y < depth_img.shape[0]:
-            corners.append((x, y))
+            valid_corners.append((x, y))
     
-    if len(corners) != 4:
+    if len(valid_corners) != 4:
         return None, None
     
     # 可视化角点
@@ -218,37 +360,177 @@ def find_cube_corners(mask, depth_img, visualize=True):
         vis_img[safe_mask_to_bool(mask)] = [255, 255, 255]  # 白色掩码
         
         # 绘制角点
-        for i, (x, y) in enumerate(corners):
+        for i, (x, y) in enumerate(valid_corners):
             cv2.circle(vis_img, (x, y), 8, (0, 255, 0), -1)  # 绿色角点
             cv2.putText(vis_img, str(i+1), (x+10, y-10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         # 绘制边界
         for i in range(4):
-            pt1 = corners[i]
-            pt2 = corners[(i+1) % 4]
+            pt1 = valid_corners[i]
+            pt2 = valid_corners[(i+1) % 4]
             cv2.line(vis_img, pt1, pt2, (0, 0, 255), 2)  # 红色边界
         
-        return corners, vis_img
+        return valid_corners, vis_img
     
-    return corners, None
+    return valid_corners, None
+
+
+def visualize_fitting_process(rgb_img, mask_np, bbox_points, output_dir, base_name, object_id):
+    """可视化平行四边形拟合过程"""
+    # 创建可视化图像
+    vis_img = rgb_img.copy()
+    
+    # 绘制掩码
+    mask_bool = mask_np.astype(bool)
+    vis_img[mask_bool] = vis_img[mask_bool] * 0.8 + np.array([255, 255, 255]) * 0.2
+    
+    # 绘制拟合的平行四边形
+    bbox_array = np.array(bbox_points, dtype=np.int32)
+    cv2.polylines(vis_img, [bbox_array], True, (0, 255, 0), 3)
+    
+    # 绘制角点
+    for i, point in enumerate(bbox_points):
+        x, y = int(point[0]), int(point[1])
+        cv2.circle(vis_img, (x, y), 8, (255, 0, 0), -1)  # 蓝色角点
+        cv2.putText(vis_img, str(i+1), (x+10, y-10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    
+    # 计算并显示拟合参数
+    # 计算边长
+    edges = []
+    for i in range(4):
+        pt1 = bbox_points[i]
+        pt2 = bbox_points[(i+1) % 4]
+        edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
+        edges.append(edge_length)
+    
+    # 计算角度
+    angles = []
+    for i in range(4):
+        pt1 = bbox_points[i]
+        pt2 = bbox_points[(i+1) % 4]
+        pt3 = bbox_points[(i+2) % 4]
+        
+        vec1 = pt2 - pt1
+        vec2 = pt3 - pt2
+        
+        dot_product = np.dot(vec1, vec2)
+        norms = np.linalg.norm(vec1) * np.linalg.norm(vec2)
+        if norms > 0:
+            cos_angle = dot_product / norms
+            cos_angle = np.clip(cos_angle, -1, 1)
+            angle = np.arccos(cos_angle) * 180 / np.pi
+            angles.append(angle)
+    
+    # 计算拟合质量
+    mask_area = np.sum(mask_np)
+    bbox_area = cv2.contourArea(bbox_array)
+    fit_quality = mask_area / bbox_area if bbox_area > 0 else 0
+    
+    # 在图像上显示参数
+    param_text = f"Object {object_id} Fitting Parameters:"
+    param_text += f"\nFit Quality: {fit_quality:.3f}"
+    param_text += f"\nEdge Lengths: {[f'{e:.1f}' for e in edges]}"
+    param_text += f"\nAngles: {[f'{a:.1f}°' for a in angles]}"
+    param_text += f"\nAngle Deviation: {np.mean([abs(a-90) for a in angles]):.1f}°"
+    
+    # 在图像左上角显示参数
+    y_offset = 30
+    for line in param_text.split('\n'):
+        cv2.putText(vis_img, line, (10, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        y_offset += 25
+    
+    # 保存结果
+    output_path = output_dir + base_name + f"_fitting_process_{object_id}.jpg"
+    cv2.imwrite(output_path, cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
+    
+    return output_path
+
+
+def evaluate_fitting_quality(mask_np, bbox_points):
+    """评估平行四边形拟合质量"""
+    # 计算掩码面积
+    mask_area = np.sum(mask_np)
+    
+    # 计算边界框面积
+    bbox_array = np.array(bbox_points, dtype=np.int32)
+    bbox_area = cv2.contourArea(bbox_array)
+    
+    # 计算拟合质量（掩码面积与边界框面积的比例）
+    fit_quality = mask_area / bbox_area if bbox_area > 0 else 0
+    
+    # 计算角度偏差
+    angles = []
+    for i in range(4):
+        pt1 = bbox_points[i]
+        pt2 = bbox_points[(i+1) % 4]
+        pt3 = bbox_points[(i+2) % 4]
+        
+        vec1 = pt2 - pt1
+        vec2 = pt3 - pt2
+        
+        dot_product = np.dot(vec1, vec2)
+        norms = np.linalg.norm(vec1) * np.linalg.norm(vec2)
+        if norms > 0:
+            cos_angle = dot_product / norms
+            cos_angle = np.clip(cos_angle, -1, 1)
+            angle = np.arccos(cos_angle) * 180 / np.pi
+            angles.append(angle)
+    
+    angle_deviation = np.mean([abs(angle - 90) for angle in angles]) if angles else 0
+    
+    # 计算边长一致性
+    edges = []
+    for i in range(4):
+        pt1 = bbox_points[i]
+        pt2 = bbox_points[(i+1) % 4]
+        edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
+        edges.append(edge_length)
+    
+    edge_consistency = np.std(edges) / np.mean(edges) if np.mean(edges) > 0 else 0
+    
+    # 评估等级
+    quality_score = 0
+    quality_grade = "Poor"
+    
+    if fit_quality > 0.8 and angle_deviation < 10 and edge_consistency < 0.1:
+        quality_score = 3
+        quality_grade = "Excellent"
+    elif fit_quality > 0.7 and angle_deviation < 20 and edge_consistency < 0.2:
+        quality_score = 2
+        quality_grade = "Good"
+    elif fit_quality > 0.6 and angle_deviation < 30 and edge_consistency < 0.3:
+        quality_score = 1
+        quality_grade = "Fair"
+    
+    return {
+        'fit_quality': fit_quality,
+        'angle_deviation': angle_deviation,
+        'edge_consistency': edge_consistency,
+        'quality_score': quality_score,
+        'quality_grade': quality_grade,
+        'angles': angles,
+        'edges': edges
+    }
 
 
 def create_comprehensive_visualization(rgb_img, depth_img, annotations, corners_list, output_dir, base_name):
     """创建综合可视化结果"""
     # 创建一个大画布来显示所有结果
     fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    fig.suptitle(f'立方体检测与角点识别结果 - {base_name}', fontsize=16, fontweight='bold')
+    fig.suptitle(f'Cube Detection and Corner Recognition Results - {base_name}', fontsize=16, fontweight='bold')
     
     # 1. 原始RGB图像
     axes[0, 0].imshow(rgb_img)
-    axes[0, 0].set_title('原始RGB图像', fontsize=12, fontweight='bold')
+    axes[0, 0].set_title('Original RGB Image', fontsize=12, fontweight='bold')
     axes[0, 0].axis('off')
     
     # 2. 深度图像
     depth_normalized = (depth_img - depth_img.min()) / (depth_img.max() - depth_img.min())
     axes[0, 1].imshow(depth_normalized, cmap='viridis')
-    axes[0, 1].set_title('深度图像', fontsize=12, fontweight='bold')
+    axes[0, 1].set_title('Depth Image', fontsize=12, fontweight='bold')
     axes[0, 1].axis('off')
     
     # 3. 分割结果
@@ -259,7 +541,7 @@ def create_comprehensive_visualization(rgb_img, depth_img, annotations, corners_
         color = np.random.randint(0, 255, 3).tolist()
         segmentation_vis[mask_bool] = segmentation_vis[mask_bool] * 0.7 + np.array(color) * 0.3
     axes[0, 2].imshow(segmentation_vis)
-    axes[0, 2].set_title(f'分割结果 ({len(annotations)}个对象)', fontsize=12, fontweight='bold')
+    axes[0, 2].set_title(f'Segmentation Results ({len(annotations)} objects)', fontsize=12, fontweight='bold')
     axes[0, 2].axis('off')
     
     # 4. 角点检测结果
@@ -280,7 +562,7 @@ def create_comprehensive_visualization(rgb_img, depth_img, annotations, corners_
                 pt2 = corners[(j+1) % 4]
                 cv2.line(corners_vis, pt1, pt2, (0, 0, 255), 2)
     axes[1, 0].imshow(corners_vis)
-    axes[1, 0].set_title(f'角点检测 ({valid_corners_count}个有效)', fontsize=12, fontweight='bold')
+    axes[1, 0].set_title(f'Corner Detection ({valid_corners_count} valid)', fontsize=12, fontweight='bold')
     axes[1, 0].axis('off')
     
     # 5. 最终结果叠加
@@ -304,28 +586,27 @@ def create_comprehensive_visualization(rgb_img, depth_img, annotations, corners_
                 cv2.line(final_vis, pt1, pt2, (0, 0, 255), 3)
     
     axes[1, 1].imshow(final_vis)
-    axes[1, 1].set_title('最终结果', fontsize=12, fontweight='bold')
+    axes[1, 1].set_title('Final Result', fontsize=12, fontweight='bold')
     axes[1, 1].axis('off')
     
     # 6. 统计信息
     axes[1, 2].axis('off')
-    stats_text = f"""
-    检测统计信息:
-    
-    原始分割数量: {len(annotations)}
-    筛选后数量: {len(annotations)}
-    有效角点数量: {valid_corners_count}
-    
-    图像尺寸: {rgb_img.shape[1]} x {rgb_img.shape[0]}
-    深度范围: {depth_img.min():.3f} - {depth_img.max():.3f}
-    """
+    stats_text = f"""Detection Statistics:
+
+Original segmentation count: {len(annotations)}
+Filtered count: {len(annotations)}
+Valid corners count: {valid_corners_count}
+
+Image size: {rgb_img.shape[1]} x {rgb_img.shape[0]}
+Depth range: {depth_img.min():.3f} - {depth_img.max():.3f}"""
     
     for i, annotation in enumerate(annotations):
-        stats_text += f"\n对象 {i+1}:"
-        stats_text += f"\n  面积: {annotation['area']:.0f}"
-        stats_text += f"\n  宽高比: {annotation['aspect_ratio']:.2f}"
-        stats_text += f"\n  深度均值: {annotation['depth_mean']:.3f}"
-        stats_text += f"\n  实心度: {annotation['solidity']:.3f}"
+        stats_text += f"\nObject {i+1}:"
+        stats_text += f"\n  Area: {annotation['area']:.0f}"
+        stats_text += f"\n  Aspect ratio: {annotation['aspect_ratio']:.2f}"
+        stats_text += f"\n  Angle deviation: {annotation['angle']:.1f}°"
+        stats_text += f"\n  Depth mean: {annotation['depth_mean']:.3f}"
+        stats_text += f"\n  Solidity: {annotation['solidity']:.3f}"
     
     axes[1, 2].text(0.1, 0.9, stats_text, transform=axes[1, 2].transAxes, 
                    fontsize=10, verticalalignment='top', fontfamily='monospace')
@@ -341,70 +622,155 @@ def create_comprehensive_visualization(rgb_img, depth_img, annotations, corners_
     return comprehensive_output_path
 
 
+def visualize_fitted_rectangles(rgb_img, filtered_annotations, output_dir, base_name):
+    """可视化拟合的矩形"""
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # 1. 原始分割结果
+    original_vis = rgb_img.copy()
+    for i, annotation in enumerate(filtered_annotations):
+        mask = annotation['segmentation']
+        mask_bool = safe_mask_to_bool(mask)
+        color = np.random.randint(0, 255, 3).tolist()
+        original_vis[mask_bool] = original_vis[mask_bool] * 0.8 + np.array(color) * 0.2
+    axes[0].imshow(original_vis)
+    axes[0].set_title('Original Segmentation Results', fontsize=12, fontweight='bold')
+    axes[0].axis('off')
+    
+    # 2. 拟合矩形结果
+    fitted_vis = rgb_img.copy()
+    for i, annotation in enumerate(filtered_annotations):
+        mask = annotation['segmentation']
+        mask_bool = safe_mask_to_bool(mask)
+        color = np.random.randint(0, 255, 3).tolist()
+        fitted_vis[mask_bool] = fitted_vis[mask_bool] * 0.8 + np.array(color) * 0.2
+        
+        # 绘制拟合的平行四边形
+        bbox = annotation['bbox']
+        bbox = np.array(bbox, dtype=np.int32)
+        cv2.polylines(fitted_vis, [bbox], True, (0, 255, 0), 2)
+        
+        # 标注ID和参数
+        centroid = np.mean(bbox, axis=0).astype(int)
+        cv2.putText(fitted_vis, f"{i+1}", (centroid[0]-10, centroid[1]+5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        
+        # 在图像上显示参数
+        quality_grade = annotation['quality_metrics']['quality_grade']
+        param_text = f"A:{annotation['aspect_ratio']:.1f} θ:{annotation['angle']:.0f}° {quality_grade}"
+        cv2.putText(fitted_vis, param_text, (centroid[0]-30, centroid[1]+25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    axes[1].imshow(fitted_vis)
+    axes[1].set_title('Fitted Rectangles with Parameters', fontsize=12, fontweight='bold')
+    axes[1].axis('off')
+    
+    plt.tight_layout()
+    
+    # 保存结果
+    fitted_output_path = output_dir + base_name + "_fitted_rectangles.png"
+    plt.savefig(fitted_output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return fitted_output_path
+
+
 def create_segmentation_process_visualization(rgb_img, all_annotations, filtered_annotations, output_dir, base_name):
     """创建分割过程可视化"""
     # 创建画布
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle(f'分割过程可视化 - {base_name}', fontsize=16, fontweight='bold')
     
-    # 1. 所有分割结果
+    # 1. 所有分割结果（带ID标注）
     all_seg_vis = rgb_img.copy()
     for i, annotation in enumerate(all_annotations):
         mask = annotation['segmentation']
         mask_bool = safe_mask_to_bool(mask)
         color = np.random.randint(0, 255, 3).tolist()
         all_seg_vis[mask_bool] = all_seg_vis[mask_bool] * 0.8 + np.array(color) * 0.2
+        
+        # 计算质心并标注ID
+        y_coords, x_coords = np.where(mask_bool)
+        if len(y_coords) > 0:
+            centroid_y, centroid_x = int(np.mean(y_coords)), int(np.mean(x_coords))
+            # 使用OpenCV在图像上标注ID
+            cv2.putText(all_seg_vis, str(i+1), (centroid_x-10, centroid_y+5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.circle(all_seg_vis, (centroid_x, centroid_y), 5, (255, 255, 255), -1)
+    
     axes[0, 0].imshow(all_seg_vis)
-    axes[0, 0].set_title(f'所有分割结果 ({len(all_annotations)}个)', fontsize=12, fontweight='bold')
     axes[0, 0].axis('off')
     
-    # 2. 筛选后的分割结果
+    # 2. 筛选后的分割结果（带ID标注）
     filtered_seg_vis = rgb_img.copy()
     for i, annotation in enumerate(filtered_annotations):
         mask = annotation['segmentation']
         mask_bool = safe_mask_to_bool(mask)
         color = np.random.randint(0, 255, 3).tolist()
         filtered_seg_vis[mask_bool] = filtered_seg_vis[mask_bool] * 0.8 + np.array(color) * 0.2
+        
+        # 计算质心并标注ID
+        y_coords, x_coords = np.where(mask_bool)
+        if len(y_coords) > 0:
+            centroid_y, centroid_x = int(np.mean(y_coords)), int(np.mean(x_coords))
+            # 使用OpenCV在图像上标注ID
+            cv2.putText(filtered_seg_vis, str(i+1), (centroid_x-10, centroid_y+5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.circle(filtered_seg_vis, (centroid_x, centroid_y), 5, (255, 255, 255), -1)
+    
     axes[0, 1].imshow(filtered_seg_vis)
-    axes[0, 1].set_title(f'筛选后结果 ({len(filtered_annotations)}个)', fontsize=12, fontweight='bold')
     axes[0, 1].axis('off')
     
     # 3. 筛选统计信息
     axes[1, 0].axis('off')
-    stats_text = f"""
-    分割筛选统计:
-    
-    原始分割数量: {len(all_annotations)}
-    筛选后数量: {len(filtered_annotations)}
-    筛选率: {len(filtered_annotations)/len(all_annotations)*100:.1f}%
-    
-    筛选条件:
-    - 面积范围: 1000-50000
-    - 宽高比: 0.5-2.0
-    - 深度标准差: < 0.1
-    - 实心度: > 0.7
-    """
-    axes[1, 0].text(0.1, 0.9, stats_text, transform=axes[1, 0].transAxes, 
-                    fontsize=10, verticalalignment='top', fontfamily='monospace')
     
     # 4. 筛选后的详细信息
     axes[1, 1].axis('off')
-    if len(filtered_annotations) > 0:
-        detail_text = "筛选后的对象详情:\n\n"
-        for i, annotation in enumerate(filtered_annotations):
-            detail_text += f"对象 {i+1}:\n"
-            detail_text += f"  面积: {annotation['area']:.0f}\n"
-            detail_text += f"  宽高比: {annotation['aspect_ratio']:.2f}\n"
-            detail_text += f"  深度均值: {annotation['depth_mean']:.3f}\n"
-            detail_text += f"  深度标准差: {annotation['depth_std']:.3f}\n"
-            detail_text += f"  实心度: {annotation['solidity']:.3f}\n\n"
-    else:
-        detail_text = "没有对象通过筛选条件"
-    
-    axes[1, 1].text(0.1, 0.9, detail_text, transform=axes[1, 1].transAxes, 
-                    fontsize=9, verticalalignment='top', fontfamily='monospace')
     
     # 调整布局
+    # 设置matplotlib使用英文显示
+    import matplotlib
+    matplotlib.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    
+    # 设置英文标题
+    fig.suptitle(f'Segmentation Process Visualization - {base_name}', fontsize=16, fontweight='bold')
+    axes[0, 0].set_title(f'All Segmentation Results ({len(all_annotations)} objects)', fontsize=12, fontweight='bold')
+    axes[0, 1].set_title(f'Filtered Results ({len(filtered_annotations)} objects)', fontsize=12, fontweight='bold')
+    
+    # 英文版本文本
+    stats_text = f"""Segmentation Filter Statistics:
+
+Original count: {len(all_annotations)}
+Filtered count: {len(filtered_annotations)}
+Filter rate: {len(filtered_annotations)/len(all_annotations)*100:.1f}%
+
+Filter conditions:
+- Area range: 1000-50000
+- Aspect ratio: 0.5-2.0
+- Angle deviation: < 30°
+- Depth std: < 0.1
+- Solidity: > 0.7"""
+    
+    detail_text = "Filtered object details:\n\n" if len(filtered_annotations) > 0 else "No objects passed filter"
+    if len(filtered_annotations) > 0:
+        for i, annotation in enumerate(filtered_annotations):
+            detail_text += f"Object {i+1}:\n"
+            detail_text += f"  Area: {annotation['area']:.0f}\n"
+            detail_text += f"  Aspect ratio: {annotation['aspect_ratio']:.2f}\n"
+            detail_text += f"  Angle deviation: {annotation['angle']:.1f}°\n"
+            detail_text += f"  Depth mean: {annotation['depth_mean']:.3f}\n"
+            detail_text += f"  Depth std: {annotation['depth_std']:.3f}\n"
+            detail_text += f"  Solidity: {annotation['solidity']:.3f}\n\n"
+    
+    # 显示统计信息
+    axes[1, 0].text(0.05, 0.95, stats_text, transform=axes[1, 0].transAxes, 
+                    fontsize=11, verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.8))
+    
+    # 显示详细信息
+    axes[1, 1].text(0.05, 0.95, detail_text, transform=axes[1, 1].transAxes, 
+                    fontsize=10, verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgreen", alpha=0.8))
+    
     plt.tight_layout()
     
     # 保存结果
@@ -503,11 +869,14 @@ def main(args):
     
     # 显示筛选结果
     for i, annotation in enumerate(filtered_annotations):
+        quality_grade = annotation['quality_metrics']['quality_grade']
         print(f"  分割 {i+1}: 面积={annotation['area']:.0f}, "
               f"宽高比={annotation['aspect_ratio']:.2f}, "
+              f"角度偏差={annotation['angle']:.1f}°, "
               f"深度均值={annotation['depth_mean']:.3f}, "
               f"深度标准差={annotation['depth_std']:.3f}, "
-              f"实心度={annotation['solidity']:.3f}")
+              f"实心度={annotation['solidity']:.3f}, "
+              f"质量等级={quality_grade}")
     
     # 创建分割过程可视化
     if len(filtered_annotations) > 0:
@@ -515,6 +884,23 @@ def main(args):
             rgb_img, annotations, filtered_annotations, args.output, args.img_path.split("/")[-1].replace('.jpg', '')
         )
         print(f"分割过程可视化已保存到: {segmentation_process_path}")
+        
+            # 创建拟合矩形可视化
+    fitted_rectangles_path = visualize_fitted_rectangles(
+        rgb_img, filtered_annotations, args.output, args.img_path.split("/")[-1].replace('.jpg', '')
+    )
+    print(f"拟合矩形可视化已保存到: {fitted_rectangles_path}")
+    
+    # 创建拟合过程可视化
+    for i, annotation in enumerate(filtered_annotations):
+        mask = annotation['segmentation']
+        mask_np = safe_mask_to_numpy(mask)
+        bbox_points = np.array(annotation['bbox'])
+        fitting_process_path = visualize_fitting_process(
+            rgb_img, mask_np, bbox_points, args.output, 
+            args.img_path.split("/")[-1].replace('.jpg', ''), i+1
+        )
+        print(f"拟合过程可视化 {i+1} 已保存到: {fitting_process_path}")
     
     # 找到角点
     print("\n=== 角点检测 ===")
@@ -523,7 +909,8 @@ def main(args):
     
     for i, annotation in enumerate(filtered_annotations):
         mask = annotation['segmentation']
-        corners, corner_vis = find_cube_corners(mask, depth_img, visualize=True)
+        bbox_points = np.array(annotation['bbox'])
+        corners, corner_vis = find_cube_corners(mask, depth_img, bbox_points=bbox_points, visualize=True)
         
         if corners is not None:
             print(f"  分割 {i+1} 角点: {corners}")
@@ -566,7 +953,7 @@ def main(args):
     final_large_path = args.output + base_name + "_final_result_large.png"
     plt.figure(figsize=(20, 15))
     plt.imshow(rgb_vis)
-    plt.title(f'立方体检测最终结果 - {base_name}', fontsize=18, fontweight='bold')
+    plt.title(f'Cube Detection Final Result - {base_name}', fontsize=18, fontweight='bold')
     plt.axis('off')
     plt.tight_layout()
     plt.savefig(final_large_path, dpi=300, bbox_inches='tight')
@@ -584,6 +971,11 @@ def main(args):
     
     if len(filtered_annotations) > 0:
         generated_files.append(segmentation_process_path)
+        generated_files.append(fitted_rectangles_path)
+        # 添加拟合过程可视化文件
+        for i, annotation in enumerate(filtered_annotations):
+            fitting_process_path = args.output + base_name + f"_fitting_process_{i+1}.jpg"
+            generated_files.append(fitting_process_path)
         for i, corner_vis in enumerate(corner_vis_list):
             if corner_vis is not None:
                 corner_output_path = args.output + base_name + f"_corners_{i+1}.jpg"
