@@ -98,44 +98,74 @@ def safe_mask_to_bool(mask):
 
 
 def optimize_parallelogram_fit(points, mask_np):
-    """优化平行四边形拟合，使其更符合立方体面的特征"""
+    """优化平行四边形拟合，使其更符合立方体上立面的特征（透视变形下的平行四边形）"""
     if len(points) < 4:
         return None
     
-    # 使用最小外接矩形作为初始估计
-    rect = cv2.minAreaRect(points)
-    initial_box = cv2.boxPoints(rect)
-    initial_box = np.int0(initial_box)
+    # 方法1: 使用凸包找到边界点，然后选择最佳的4个点
+    try:
+        hull = ConvexHull(points)
+        hull_points = points[hull.vertices]
+        
+        # 如果凸包点数等于4，直接使用
+        if len(hull_points) == 4:
+            return hull_points
+        elif len(hull_points) > 4:
+            # 遍历所有点，选择最接近平行四边形的4个点
+            best_points = select_best_parallelogram_points(hull_points)
+            # 计算拟合质量
+            bbox_array = np.array(best_points)
+            mask_area = np.sum(mask_np)
+            bbox_area = cv2.contourArea(bbox_array)
+            fit_quality = mask_area / bbox_area if bbox_area > 0 else 0
+            if abs(fit_quality - 1) < 0.5:
+                return best_points
+            else:
+                return None
+    except:
+        pass
     
-    # 计算矩形的面积和角度
-    rect_area = cv2.contourArea(initial_box)
-    mask_area = np.sum(mask_np)
-    
-    # 计算拟合质量（掩码面积与矩形面积的比例）
-    fit_quality = mask_area / rect_area if rect_area > 0 else 0
-    
-    # 如果拟合质量太差，尝试其他方法
-    if fit_quality < 0.6:
-        # 尝试使用凸包
-        try:
-            hull = ConvexHull(points)
-            hull_points = points[hull.vertices]
+    # # 方法2: 使用轮廓检测找到角点
+    # try:
+    #     # 创建掩码图像
+    #     mask_img = np.zeros((mask_np.shape[0], mask_np.shape[1]), dtype=np.uint8)
+    #     mask_img[mask_np] = 255
+        
+    #     # 找到轮廓
+    #     contours, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    #     if contours:
+    #         # 使用最大的轮廓
+    #         largest_contour = max(contours, key=cv2.contourArea)
             
-            # 如果凸包点数等于4，直接使用
-            if len(hull_points) == 4:
-                return hull_points
-            elif len(hull_points) > 4:
-                # 选择最接近矩形的4个点
-                hull_points = select_best_rectangle_points(hull_points)
-                return hull_points
-        except:
-            pass
+    #         # 使用Douglas-Peucker算法简化轮廓
+    #         epsilon = 0.02 * cv2.arcLength(largest_contour, True)
+    #         approx = cv2.approxPolyDP(largest_contour, epsilon, True)
+            
+    #         # 如果简化后有4个点，直接使用
+    #         if len(approx) == 4:
+    #             return approx.reshape(-1, 2)
+    #         elif len(approx) > 4:
+    #             # 选择最接近平行四边形的4个点
+    #             approx_points = approx.reshape(-1, 2)
+    #             best_points = select_best_parallelogram_points(approx_points)
+    #             return best_points
+    # except:
+    #     pass
     
-    return initial_box
+    # # 方法3: 使用最小外接矩形作为备选方案
+    # try:
+    #     rect = cv2.minAreaRect(points)
+    #     initial_box = cv2.boxPoints(rect)
+    #     initial_box = np.int0(initial_box)
+    #     return initial_box
+    # except:
+    #     pass
+    
+    return None
 
 
-def select_best_rectangle_points(points):
-    """从多个点中选择最接近矩形的4个点"""
+def select_best_parallelogram_points(points):
+    """从多个点中选择最接近平行四边形的4个点"""
     if len(points) <= 4:
         return points[:4]
     
@@ -147,35 +177,100 @@ def select_best_rectangle_points(points):
     for combo in combinations(points, 4):
         combo = np.array(combo)
         
-        # 计算角度偏差
-        angles = []
-        for i in range(4):
-            pt1 = combo[i]
-            pt2 = combo[(i+1) % 4]
-            pt3 = combo[(i+2) % 4]
-            
-            vec1 = pt2 - pt1
-            vec2 = pt3 - pt2
-            
-            dot_product = np.dot(vec1, vec2)
-            norms = np.linalg.norm(vec1) * np.linalg.norm(vec2)
-            if norms > 0:
-                cos_angle = dot_product / norms
-                cos_angle = np.clip(cos_angle, -1, 1)
-                angle = np.arccos(cos_angle) * 180 / np.pi
-                angles.append(abs(angle - 90))
-        
-        if len(angles) == 4:
-            score = np.mean(angles)  # 角度偏差的平均值
-            if score < best_score:
-                best_score = score
-                best_points = combo
+        # 计算平行四边形特征评分
+        score = calculate_parallelogram_score(combo)
+        if score < best_score:
+            best_score = score
+            best_points = combo
     
     return best_points if best_points is not None else points[:4]
 
 
+def calculate_parallelogram_score(points):
+    """计算4个点构成平行四边形的质量评分（分数越低越好）"""
+    if len(points) != 4:
+        return float('inf')
+    
+    # 使用公共函数计算角度和边长
+    angles, edges = calculate_angles_and_edges(points)
+    if angles is None or edges is None:
+        return float('inf')
+    
+    # 计算评分指标
+    
+    # 1. 对角度数一致性（平行四边形对角度数相等）
+    angle_pairs = [(angles[0], angles[2]), (angles[1], angles[3])]
+    angle_consistency_score = sum(abs(pair[0] - pair[1]) for pair in angle_pairs)
+    
+    # 2. 对边长度一致性（平行四边形对边长度相等）
+    edge_pairs = [(edges[0], edges[2]), (edges[1], edges[3])]
+    edge_consistency_score = 0
+    for pair in edge_pairs:
+        if max(pair[0], pair[1]) > 0:
+            edge_consistency_score += abs(pair[0] - pair[1]) / max(pair[0], pair[1])
+    
+    # 3. 角度合理性（应该在60-120度范围内，适应透视）
+    angle_reasonableness = 0
+    for angle in angles:
+        if angle < 60 or angle > 120:
+            angle_reasonableness += min(abs(angle - 60), abs(angle - 120))
+    
+    # 4. 面积合理性（避免过于细长的形状）
+    area = cv2.contourArea(points.astype(np.int32))
+    perimeter = sum(edges)
+    if perimeter > 0:
+        compactness = 4 * np.pi * area / (perimeter * perimeter)
+        compactness_score = abs(compactness - 0.785)  # 理想正方形的紧凑度
+    else:
+        compactness_score = 1.0
+    
+    # 综合评分（权重可调整）
+    total_score = (
+        angle_consistency_score * 2.0 +      # 对角度数一致性最重要
+        edge_consistency_score * 1.5 +       # 对边长度一致性次之
+        angle_reasonableness * 0.5 +         # 角度合理性
+        compactness_score * 1.0              # 紧凑度
+    )
+    
+    return total_score
+
+
+def calculate_angles_and_edges(points):
+    """计算4个点的角度和边长"""
+    if len(points) != 4:
+        return None, None
+    
+    # 计算边长
+    edges = []
+    for i in range(4):
+        pt1 = points[i]
+        pt2 = points[(i+1) % 4]
+        edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
+        edges.append(edge_length)
+    
+    # 计算角度
+    angles = []
+    for i in range(4):
+        pt1 = points[i]
+        pt2 = points[(i+1) % 4]
+        pt3 = points[(i+2) % 4]
+        
+        vec1 = pt2 - pt1
+        vec2 = pt3 - pt2
+        
+        dot_product = np.dot(vec1, vec2)
+        norms = np.linalg.norm(vec1) * np.linalg.norm(vec2)
+        if norms > 0:
+            cos_angle = dot_product / norms
+            cos_angle = np.clip(cos_angle, -1, 1)
+            angle = np.arccos(cos_angle) * 180 / np.pi
+            angles.append(angle)
+    
+    return angles, edges
+
+
 def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
-    """基于几何特征和深度信息筛选立方体分割"""
+    """基于几何特征和深度信息筛选立方体上立面分割（平行四边形特征）"""
     filtered_annotations = []
     
     for i, annotation in enumerate(annotations):
@@ -194,13 +289,13 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
         if len(y_coords) == 0:
             continue
         
-        # 使用优化的平行四边形拟合
+        # 使用优化的平行四边形拟合，采用多种方法确保准确性
         points = np.column_stack((x_coords, y_coords))
         if len(points) < 4:
             continue
             
         try:
-            # 使用优化的平行四边形拟合
+            # 使用优化的平行四边形拟合，找到最符合平行四边形的四个点。采用多种方法确保准确性
             bbox_points = optimize_parallelogram_fit(points, mask_np)
             if bbox_points is None:
                 continue
@@ -211,87 +306,85 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
             sorted_indices = np.argsort(angles)
             bbox_points = bbox_points[sorted_indices]
             
-            # 计算平行四边形的边长
-            edges = []
-            for i in range(4):
-                pt1 = bbox_points[i]
-                pt2 = bbox_points[(i+1) % 4]
-                edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
-                edges.append(edge_length)
+            # 使用公共函数计算角度和边长
+            angles_deg, edges = calculate_angles_and_edges(bbox_points)
+            if angles_deg is None or edges is None:
+                continue
             
             # 计算宽高比（使用对边的平均值）
             width = (edges[0] + edges[2]) / 2  # 对边平均
             height = (edges[1] + edges[3]) / 2  # 对边平均
             
-            # 检查宽高比（立方体应该有合理的宽高比）
+            # 检查宽高比（立方体上立面应该有合理的宽高比）
             aspect_ratio = width / height
-            if aspect_ratio < 0.5 or aspect_ratio > 2.0:
-                continue
+            # if aspect_ratio < 0.5 or aspect_ratio > 2.0:
+            #     continue
                 
-            # 计算角度（检查是否接近矩形）
-            angles_deg = []
-            for i in range(4):
-                pt1 = bbox_points[i]
-                pt2 = bbox_points[(i+1) % 4]
-                pt3 = bbox_points[(i+2) % 4]
-                
-                # 计算两个向量
-                vec1 = pt2 - pt1
-                vec2 = pt3 - pt2
-                
-                # 计算角度
-                dot_product = np.dot(vec1, vec2)
-                norms = np.linalg.norm(vec1) * np.linalg.norm(vec2)
-                if norms > 0:
-                    cos_angle = dot_product / norms
-                    cos_angle = np.clip(cos_angle, -1, 1)  # 避免数值误差
-                    angle = np.arccos(cos_angle) * 180 / np.pi
-                    angles_deg.append(angle)
+            # 检查平行四边形角度特征（对角度数相等，适应透视变形）
+            # 检查对角度数是否相近（允许15度误差）
+            angle_pairs = [(angles_deg[0], angles_deg[2]), (angles_deg[1], angles_deg[3])]
+            angle_consistency = True
+            for pair in angle_pairs:
+                if abs(pair[0] - pair[1]) > 15:
+                    angle_consistency = False
+                    break
             
-            # 检查角度是否接近90度（允许一定误差）
+            if not angle_consistency:
+                continue
+            
+            # 计算角度偏差（理想情况下应该在60-120度范围，适应透视）
             angle_deviation = np.mean([abs(angle - 90) for angle in angles_deg])
-            if angle_deviation > 30:  # 允许30度的角度偏差
+            if angle_deviation > 45:  # 允许45度的角度偏差，适应透视变形
+                continue
+            
+            # 计算深度统计信息
+            depth_values = depth_img[safe_mask_to_bool(mask)]
+            if len(depth_values) == 0:
                 continue
                 
-        except:
-            continue
-        
-        # 计算深度统计信息
-        depth_values = depth_img[safe_mask_to_bool(mask)]
-        if len(depth_values) == 0:
-            continue
+            depth_mean = np.mean(depth_values)
+            depth_std = np.std(depth_values)
             
-        depth_mean = np.mean(depth_values)
-        depth_std = np.std(depth_values)
-        
-        # 检查深度变化（上立面应该有较小的深度变化）
-        if depth_std > 0.1:  # 深度变化太大，可能不是上立面
-            continue
-        
-        # 计算凸包
-        points = np.column_stack((x_coords, y_coords))
-        if len(points) < 4:
-            continue
+            # 检查深度变化（立方体上立面应该有较小的深度变化，但允许透视变形）
+            if depth_std > 0.15:  # 允许更大的深度变化，适应透视效果
+                continue
             
-        try:
+            # 计算凸包
+            points = np.column_stack((x_coords, y_coords))
+            if len(points) < 4:
+                continue
+                
             hull = ConvexHull(points)
             hull_area = hull.volume  # 对于2D，volume实际上是面积
             solidity = area / hull_area
             
-            # 立方体上立面应该有较高的实心度
-            if solidity < 0.7:
+            # 立方体上立面应该有较高的实心度（接近平行四边形）
+            if solidity < 0.6:  # 降低要求，适应透视变形
+                continue
+            
+            # 检查平行四边形的对边长度一致性
+            edge_consistency = True
+            if len(edges) == 4:
+                # 检查对边长度是否相近（允许25%误差，适应透视变形）
+                edge_pairs = [(edges[0], edges[2]), (edges[1], edges[3])]
+                for pair in edge_pairs:
+                    if abs(pair[0] - pair[1]) / max(pair[0], pair[1]) > 0.25:
+                        edge_consistency = False
+                        break
+            
+            if not edge_consistency:
                 continue
                 
         except:
             continue
         
-        # 评估拟合质量
-        quality_metrics = evaluate_fitting_quality(mask_np, bbox_points)
+        # 评估拟合质量，传入预计算的角度和边长
+        quality_metrics = evaluate_fitting_quality(mask_np, bbox_points, angles_deg, edges)
         
         # 添加到筛选结果
         annotation['bbox'] = bbox_points.tolist()  # 使用拟合的平行四边形顶点
         annotation['area'] = area
-        annotation['aspect_ratio'] = aspect_ratio
+        # annotation['aspect_ratio'] = aspect_ratio
         annotation['angle'] = angle_deviation  # 角度偏差
         annotation['depth_mean'] = depth_mean
         annotation['depth_std'] = depth_std
@@ -309,8 +402,10 @@ def find_cube_corners(mask, depth_img, bbox_points=None, visualize=True):
     mask_np = safe_mask_to_numpy(mask)
     
     # 如果提供了边界框点，直接使用
-    if bbox_points is not None:
-        corners = bbox_points.tolist()
+    # if bbox_points is not None:
+    #     corners = bbox_points.tolist()
+    if 1 == 2:
+        print("1 == 2")
     else:
         # 获取掩码边界
         y_coords, x_coords = np.where(mask_np)
@@ -319,29 +414,12 @@ def find_cube_corners(mask, depth_img, bbox_points=None, visualize=True):
         
         points = np.column_stack((x_coords, y_coords))
         
-        # 使用凸包找到边界点
-        try:
-            hull = ConvexHull(points)
-            hull_points = points[hull.vertices]
-        except:
+        # 使用优化的平行四边形拟合
+        bbox_points = optimize_parallelogram_fit(points, mask_np)
+        if bbox_points is None:
             return None, None
         
-        # 如果凸包点数不等于4，尝试找到最接近矩形的4个点
-        if len(hull_points) != 4:
-            # 计算最小外接矩形
-            rect = cv2.minAreaRect(hull_points)
-            box = cv2.boxPoints(rect)
-            box = np.int0(box)
-            hull_points = box
-        
-        # 按顺时针顺序排列角点
-        hull_points = np.array(hull_points)
-        center = np.mean(hull_points, axis=0)
-        angles = np.arctan2(hull_points[:, 1] - center[1], hull_points[:, 0] - center[0])
-        sorted_indices = np.argsort(angles)
-        hull_points = hull_points[sorted_indices]
-        
-        corners = hull_points.tolist()
+        corners = bbox_points.tolist()
     
     # 验证角点
     valid_corners = []
@@ -376,7 +454,7 @@ def find_cube_corners(mask, depth_img, bbox_points=None, visualize=True):
     return valid_corners, None
 
 
-def visualize_fitting_process(rgb_img, mask_np, bbox_points, output_dir, base_name, object_id):
+def visualize_fitting_process(rgb_img, mask_np, bbox_points, output_dir, base_name, object_id, angles=None, edges=None):
     """可视化平行四边形拟合过程"""
     # 创建可视化图像
     vis_img = rgb_img.copy()
@@ -397,31 +475,11 @@ def visualize_fitting_process(rgb_img, mask_np, bbox_points, output_dir, base_na
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
     
     # 计算并显示拟合参数
-    # 计算边长
-    edges = []
-    for i in range(4):
-        pt1 = bbox_points[i]
-        pt2 = bbox_points[(i+1) % 4]
-        edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
-        edges.append(edge_length)
-    
-    # 计算角度
-    angles = []
-    for i in range(4):
-        pt1 = bbox_points[i]
-        pt2 = bbox_points[(i+1) % 4]
-        pt3 = bbox_points[(i+2) % 4]
-        
-        vec1 = pt2 - pt1
-        vec2 = pt3 - pt2
-        
-        dot_product = np.dot(vec1, vec2)
-        norms = np.linalg.norm(vec1) * np.linalg.norm(vec2)
-        if norms > 0:
-            cos_angle = dot_product / norms
-            cos_angle = np.clip(cos_angle, -1, 1)
-            angle = np.arccos(cos_angle) * 180 / np.pi
-            angles.append(angle)
+    # 如果没有提供预计算的角度和边长，则计算
+    if angles is None or edges is None:
+        angles, edges = calculate_angles_and_edges(bbox_points)
+        if angles is None or edges is None:
+            angles, edges = [], []
     
     # 计算拟合质量
     mask_area = np.sum(mask_np)
@@ -449,7 +507,7 @@ def visualize_fitting_process(rgb_img, mask_np, bbox_points, output_dir, base_na
     return output_path
 
 
-def evaluate_fitting_quality(mask_np, bbox_points):
+def evaluate_fitting_quality(mask_np, bbox_points, angles=None, edges=None):
     """评估平行四边形拟合质量"""
     # 计算掩码面积
     mask_area = np.sum(mask_np)
@@ -461,47 +519,35 @@ def evaluate_fitting_quality(mask_np, bbox_points):
     # 计算拟合质量（掩码面积与边界框面积的比例）
     fit_quality = mask_area / bbox_area if bbox_area > 0 else 0
     
-    # 计算角度偏差
-    angles = []
-    for i in range(4):
-        pt1 = bbox_points[i]
-        pt2 = bbox_points[(i+1) % 4]
-        pt3 = bbox_points[(i+2) % 4]
-        
-        vec1 = pt2 - pt1
-        vec2 = pt3 - pt2
-        
-        dot_product = np.dot(vec1, vec2)
-        norms = np.linalg.norm(vec1) * np.linalg.norm(vec2)
-        if norms > 0:
-            cos_angle = dot_product / norms
-            cos_angle = np.clip(cos_angle, -1, 1)
-            angle = np.arccos(cos_angle) * 180 / np.pi
-            angles.append(angle)
+    # 如果没有提供预计算的角度和边长，则计算
+    if angles is None or edges is None:
+        angles, edges = calculate_angles_and_edges(bbox_points)
+        if angles is None or edges is None:
+            return {
+                'fit_quality': 0,
+                'angle_deviation': 0,
+                'edge_consistency': 0,
+                'quality_score': 0,
+                'quality_grade': "Poor",
+                'angles': [],
+                'edges': []
+            }
     
     angle_deviation = np.mean([abs(angle - 90) for angle in angles]) if angles else 0
     
-    # 计算边长一致性
-    edges = []
-    for i in range(4):
-        pt1 = bbox_points[i]
-        pt2 = bbox_points[(i+1) % 4]
-        edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
-        edges.append(edge_length)
-    
     edge_consistency = np.std(edges) / np.mean(edges) if np.mean(edges) > 0 else 0
     
-    # 评估等级
+    # 评估等级（针对平行四边形特征调整）
     quality_score = 0
     quality_grade = "Poor"
     
-    if fit_quality > 0.8 and angle_deviation < 10 and edge_consistency < 0.1:
+    if fit_quality > 0.75 and angle_deviation < 20 and edge_consistency < 0.15:
         quality_score = 3
         quality_grade = "Excellent"
-    elif fit_quality > 0.7 and angle_deviation < 20 and edge_consistency < 0.2:
+    elif fit_quality > 0.65 and angle_deviation < 35 and edge_consistency < 0.25:
         quality_score = 2
         quality_grade = "Good"
-    elif fit_quality > 0.6 and angle_deviation < 30 and edge_consistency < 0.3:
+    elif fit_quality > 0.55 and angle_deviation < 45 and edge_consistency < 0.35:
         quality_score = 1
         quality_grade = "Fair"
     
@@ -593,17 +639,17 @@ def create_comprehensive_visualization(rgb_img, depth_img, annotations, corners_
     axes[1, 2].axis('off')
     stats_text = f"""Detection Statistics:
 
-Original segmentation count: {len(annotations)}
-Filtered count: {len(annotations)}
-Valid corners count: {valid_corners_count}
+    Original segmentation count: {len(annotations)}
+    Filtered count: {len(annotations)}
+    Valid corners count: {valid_corners_count}
 
-Image size: {rgb_img.shape[1]} x {rgb_img.shape[0]}
-Depth range: {depth_img.min():.3f} - {depth_img.max():.3f}"""
+    Image size: {rgb_img.shape[1]} x {rgb_img.shape[0]}
+    Depth range: {depth_img.min():.3f} - {depth_img.max():.3f}"""
     
     for i, annotation in enumerate(annotations):
         stats_text += f"\nObject {i+1}:"
         stats_text += f"\n  Area: {annotation['area']:.0f}"
-        stats_text += f"\n  Aspect ratio: {annotation['aspect_ratio']:.2f}"
+        # stats_text += f"\n  Aspect ratio: {annotation['aspect_ratio']:.2f}"
         stats_text += f"\n  Angle deviation: {annotation['angle']:.1f}°"
         stats_text += f"\n  Depth mean: {annotation['depth_mean']:.3f}"
         stats_text += f"\n  Solidity: {annotation['solidity']:.3f}"
@@ -657,7 +703,8 @@ def visualize_fitted_rectangles(rgb_img, filtered_annotations, output_dir, base_
         
         # 在图像上显示参数
         quality_grade = annotation['quality_metrics']['quality_grade']
-        param_text = f"A:{annotation['aspect_ratio']:.1f} θ:{annotation['angle']:.0f}° {quality_grade}"
+        # param_text = f"A:{annotation['aspect_ratio']:.1f} θ:{annotation['angle']:.0f}° {quality_grade}"
+        param_text = f"θ:{annotation['angle']:.0f}° {quality_grade}"
         cv2.putText(fitted_vis, param_text, (centroid[0]-30, centroid[1]+25), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
@@ -739,23 +786,23 @@ def create_segmentation_process_visualization(rgb_img, all_annotations, filtered
     # 英文版本文本
     stats_text = f"""Segmentation Filter Statistics:
 
-Original count: {len(all_annotations)}
-Filtered count: {len(filtered_annotations)}
-Filter rate: {len(filtered_annotations)/len(all_annotations)*100:.1f}%
+    Original count: {len(all_annotations)}
+    Filtered count: {len(filtered_annotations)}
+    Filter rate: {len(filtered_annotations)/len(all_annotations)*100:.1f}%
 
-Filter conditions:
-- Area range: 1000-50000
-- Aspect ratio: 0.5-2.0
-- Angle deviation: < 30°
-- Depth std: < 0.1
-- Solidity: > 0.7"""
+    Filter conditions:
+    - Area range: 1000-50000
+    - Aspect ratio: 0.5-2.0
+    - Angle deviation: < 30°
+    - Depth std: < 0.1
+    - Solidity: > 0.7"""
     
     detail_text = "Filtered object details:\n\n" if len(filtered_annotations) > 0 else "No objects passed filter"
     if len(filtered_annotations) > 0:
         for i, annotation in enumerate(filtered_annotations):
             detail_text += f"Object {i+1}:\n"
             detail_text += f"  Area: {annotation['area']:.0f}\n"
-            detail_text += f"  Aspect ratio: {annotation['aspect_ratio']:.2f}\n"
+            # detail_text += f"  Aspect ratio: {annotation['aspect_ratio']:.2f}\n"
             detail_text += f"  Angle deviation: {annotation['angle']:.1f}°\n"
             detail_text += f"  Depth mean: {annotation['depth_mean']:.3f}\n"
             detail_text += f"  Depth std: {annotation['depth_std']:.3f}\n"
@@ -813,6 +860,39 @@ def visualize_results(rgb_img, depth_img, annotations, corners_list, output_path
     return rgb_vis
 
 
+def simple_segmentation_visualization(rgb_img, annotations, output_dir, base_name):
+    """简单的分割结果可视化，显示所有分割对象并标注ID"""
+    # 创建可视化图像
+    vis_img = rgb_img.copy()
+    
+    # 为每个分割对象添加颜色和ID标注
+    for i, annotation in enumerate(annotations):
+        mask = annotation['segmentation']
+        mask_bool = safe_mask_to_bool(mask)
+        
+        # 生成随机颜色
+        color = np.random.randint(0, 255, 3).tolist()
+        
+        # 在掩码区域应用颜色
+        vis_img[mask_bool] = vis_img[mask_bool] * 0.7 + np.array(color) * 0.3
+        
+        # 计算质心用于标注ID
+        y_coords, x_coords = np.where(mask_bool)
+        if len(y_coords) > 0:
+            centroid_y, centroid_x = int(np.mean(y_coords)), int(np.mean(x_coords))
+            
+            # 标注ID
+            cv2.putText(vis_img, str(i+1), (centroid_x-10, centroid_y+5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.circle(vis_img, (centroid_x, centroid_y), 5, (255, 255, 255), -1)
+    
+    # 保存结果
+    output_path = output_dir + base_name + "_all_segmentations.jpg"
+    cv2.imwrite(output_path, cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
+    
+    return output_path
+
+
 def main(args):
     # 加载模型
     model = FastSAM(args.model_path)
@@ -861,9 +941,15 @@ def main(args):
             'area': np.sum(mask_np)
         }
         annotations.append(annotation)
+
+    # 简单可视化所有分割结果
+    print(f"\n检测到 {len(annotations)} 个分割对象，正在生成可视化...")
+    base_name = args.img_path.split("/")[-1].replace('.jpg', '')
+    simple_vis_path = simple_segmentation_visualization(rgb_img, annotations, args.output, base_name)
+    print(f"所有分割结果可视化已保存到: {simple_vis_path}")
     
-    # 筛选立方体分割
-    print("\n=== 筛选立方体分割 ===")
+    # 筛选立方体上立面分割
+    print("\n=== 筛选立方体上立面分割 ===")
     filtered_annotations = filter_cube_segments(annotations, depth_img)
     print(f"筛选后的分割数量: {len(filtered_annotations)}")
     
@@ -871,7 +957,7 @@ def main(args):
     for i, annotation in enumerate(filtered_annotations):
         quality_grade = annotation['quality_metrics']['quality_grade']
         print(f"  分割 {i+1}: 面积={annotation['area']:.0f}, "
-              f"宽高比={annotation['aspect_ratio']:.2f}, "
+            #   f"宽高比={annotation['aspect_ratio']:.2f}, "
               f"角度偏差={annotation['angle']:.1f}°, "
               f"深度均值={annotation['depth_mean']:.3f}, "
               f"深度标准差={annotation['depth_std']:.3f}, "
@@ -885,7 +971,7 @@ def main(args):
         )
         print(f"分割过程可视化已保存到: {segmentation_process_path}")
         
-            # 创建拟合矩形可视化
+    # 创建拟合矩形可视化
     fitted_rectangles_path = visualize_fitted_rectangles(
         rgb_img, filtered_annotations, args.output, args.img_path.split("/")[-1].replace('.jpg', '')
     )
@@ -896,9 +982,12 @@ def main(args):
         mask = annotation['segmentation']
         mask_np = safe_mask_to_numpy(mask)
         bbox_points = np.array(annotation['bbox'])
+        # 获取预计算的角度和边长
+        angles = annotation['quality_metrics']['angles']
+        edges = annotation['quality_metrics']['edges']
         fitting_process_path = visualize_fitting_process(
             rgb_img, mask_np, bbox_points, args.output, 
-            args.img_path.split("/")[-1].replace('.jpg', ''), i+1
+            args.img_path.split("/")[-1].replace('.jpg', ''), i+1, angles, edges
         )
         print(f"拟合过程可视化 {i+1} 已保存到: {fitting_process_path}")
     
@@ -963,6 +1052,7 @@ def main(args):
     # 显示生成的文件总结
     print("\n=== 生成的文件总结 ===")
     generated_files = [
+        simple_vis_path,  # 添加简单可视化
         comprehensive_path,
         rgb_output_path,
         depth_output_path,
