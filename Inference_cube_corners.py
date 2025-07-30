@@ -7,6 +7,8 @@ from utils.tools import convert_box_xywh_to_xyxy
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端，避免显示问题
 from scipy.spatial import ConvexHull
 from scipy.ndimage import gaussian_filter
 
@@ -81,6 +83,20 @@ def load_depth_image(depth_path):
     return depth_img
 
 
+def safe_mask_to_numpy(mask):
+    """安全地将mask转换为numpy数组"""
+    if hasattr(mask, 'cpu'):
+        return mask.cpu().numpy()
+    else:
+        return mask
+
+
+def safe_mask_to_bool(mask):
+    """安全地将mask转换为布尔数组，用于索引"""
+    mask_np = safe_mask_to_numpy(mask)
+    return mask_np.astype(bool)
+
+
 def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
     """基于几何特征和深度信息筛选立方体分割"""
     filtered_annotations = []
@@ -88,13 +104,16 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
     for i, annotation in enumerate(annotations):
         mask = annotation['segmentation']
         
+        # 确保mask是numpy数组
+        mask_np = safe_mask_to_numpy(mask)
+        
         # 计算面积
-        area = np.sum(mask)
+        area = np.sum(mask_np)
         if area < min_area or area > max_area:
             continue
         
         # 计算边界框
-        y_coords, x_coords = np.where(mask)
+        y_coords, x_coords = np.where(mask_np)
         if len(y_coords) == 0:
             continue
             
@@ -108,7 +127,7 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
             continue
         
         # 计算深度统计信息
-        depth_values = depth_img[mask]
+        depth_values = depth_img[safe_mask_to_bool(mask)]
         if len(depth_values) == 0:
             continue
             
@@ -150,8 +169,11 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
 
 def find_cube_corners(mask, depth_img, visualize=True):
     """找到立方体上立面的四个角点"""
+    # 确保mask是numpy数组
+    mask_np = safe_mask_to_numpy(mask)
+    
     # 获取掩码边界
-    y_coords, x_coords = np.where(mask)
+    y_coords, x_coords = np.where(mask_np)
     if len(y_coords) < 4:
         return None, None
     
@@ -193,7 +215,7 @@ def find_cube_corners(mask, depth_img, visualize=True):
     if visualize:
         # 创建可视化图像
         vis_img = np.zeros((depth_img.shape[0], depth_img.shape[1], 3), dtype=np.uint8)
-        vis_img[mask] = [255, 255, 255]  # 白色掩码
+        vis_img[safe_mask_to_bool(mask)] = [255, 255, 255]  # 白色掩码
         
         # 绘制角点
         for i, (x, y) in enumerate(corners):
@@ -212,6 +234,187 @@ def find_cube_corners(mask, depth_img, visualize=True):
     return corners, None
 
 
+def create_comprehensive_visualization(rgb_img, depth_img, annotations, corners_list, output_dir, base_name):
+    """创建综合可视化结果"""
+    # 创建一个大画布来显示所有结果
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle(f'立方体检测与角点识别结果 - {base_name}', fontsize=16, fontweight='bold')
+    
+    # 1. 原始RGB图像
+    axes[0, 0].imshow(rgb_img)
+    axes[0, 0].set_title('原始RGB图像', fontsize=12, fontweight='bold')
+    axes[0, 0].axis('off')
+    
+    # 2. 深度图像
+    depth_normalized = (depth_img - depth_img.min()) / (depth_img.max() - depth_img.min())
+    axes[0, 1].imshow(depth_normalized, cmap='viridis')
+    axes[0, 1].set_title('深度图像', fontsize=12, fontweight='bold')
+    axes[0, 1].axis('off')
+    
+    # 3. 分割结果
+    segmentation_vis = rgb_img.copy()
+    for i, annotation in enumerate(annotations):
+        mask = annotation['segmentation']
+        mask_bool = safe_mask_to_bool(mask)
+        color = np.random.randint(0, 255, 3).tolist()
+        segmentation_vis[mask_bool] = segmentation_vis[mask_bool] * 0.7 + np.array(color) * 0.3
+    axes[0, 2].imshow(segmentation_vis)
+    axes[0, 2].set_title(f'分割结果 ({len(annotations)}个对象)', fontsize=12, fontweight='bold')
+    axes[0, 2].axis('off')
+    
+    # 4. 角点检测结果
+    corners_vis = rgb_img.copy()
+    valid_corners_count = 0
+    for i, corners in enumerate(corners_list):
+        if corners is not None:
+            valid_corners_count += 1
+            # 绘制角点
+            for j, (x, y) in enumerate(corners):
+                cv2.circle(corners_vis, (x, y), 8, (0, 255, 0), -1)
+                cv2.putText(corners_vis, str(j+1), (x+10, y-10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # 绘制边界
+            for j in range(4):
+                pt1 = corners[j]
+                pt2 = corners[(j+1) % 4]
+                cv2.line(corners_vis, pt1, pt2, (0, 0, 255), 2)
+    axes[1, 0].imshow(corners_vis)
+    axes[1, 0].set_title(f'角点检测 ({valid_corners_count}个有效)', fontsize=12, fontweight='bold')
+    axes[1, 0].axis('off')
+    
+    # 5. 最终结果叠加
+    final_vis = rgb_img.copy()
+    for i, annotation in enumerate(annotations):
+        mask = annotation['segmentation']
+        mask_bool = safe_mask_to_bool(mask)
+        color = np.random.randint(0, 255, 3).tolist()
+        final_vis[mask_bool] = final_vis[mask_bool] * 0.8 + np.array(color) * 0.2
+    
+    for corners in corners_list:
+        if corners is not None:
+            for j, (x, y) in enumerate(corners):
+                cv2.circle(final_vis, (x, y), 10, (0, 255, 0), -1)
+                cv2.putText(final_vis, str(j+1), (x+15, y-15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            
+            for j in range(4):
+                pt1 = corners[j]
+                pt2 = corners[(j+1) % 4]
+                cv2.line(final_vis, pt1, pt2, (0, 0, 255), 3)
+    
+    axes[1, 1].imshow(final_vis)
+    axes[1, 1].set_title('最终结果', fontsize=12, fontweight='bold')
+    axes[1, 1].axis('off')
+    
+    # 6. 统计信息
+    axes[1, 2].axis('off')
+    stats_text = f"""
+    检测统计信息:
+    
+    原始分割数量: {len(annotations)}
+    筛选后数量: {len(annotations)}
+    有效角点数量: {valid_corners_count}
+    
+    图像尺寸: {rgb_img.shape[1]} x {rgb_img.shape[0]}
+    深度范围: {depth_img.min():.3f} - {depth_img.max():.3f}
+    """
+    
+    for i, annotation in enumerate(annotations):
+        stats_text += f"\n对象 {i+1}:"
+        stats_text += f"\n  面积: {annotation['area']:.0f}"
+        stats_text += f"\n  宽高比: {annotation['aspect_ratio']:.2f}"
+        stats_text += f"\n  深度均值: {annotation['depth_mean']:.3f}"
+        stats_text += f"\n  实心度: {annotation['solidity']:.3f}"
+    
+    axes[1, 2].text(0.1, 0.9, stats_text, transform=axes[1, 2].transAxes, 
+                   fontsize=10, verticalalignment='top', fontfamily='monospace')
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存综合可视化结果
+    comprehensive_output_path = output_dir + base_name + "_comprehensive_visualization.png"
+    plt.savefig(comprehensive_output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return comprehensive_output_path
+
+
+def create_segmentation_process_visualization(rgb_img, all_annotations, filtered_annotations, output_dir, base_name):
+    """创建分割过程可视化"""
+    # 创建画布
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle(f'分割过程可视化 - {base_name}', fontsize=16, fontweight='bold')
+    
+    # 1. 所有分割结果
+    all_seg_vis = rgb_img.copy()
+    for i, annotation in enumerate(all_annotations):
+        mask = annotation['segmentation']
+        mask_bool = safe_mask_to_bool(mask)
+        color = np.random.randint(0, 255, 3).tolist()
+        all_seg_vis[mask_bool] = all_seg_vis[mask_bool] * 0.8 + np.array(color) * 0.2
+    axes[0, 0].imshow(all_seg_vis)
+    axes[0, 0].set_title(f'所有分割结果 ({len(all_annotations)}个)', fontsize=12, fontweight='bold')
+    axes[0, 0].axis('off')
+    
+    # 2. 筛选后的分割结果
+    filtered_seg_vis = rgb_img.copy()
+    for i, annotation in enumerate(filtered_annotations):
+        mask = annotation['segmentation']
+        mask_bool = safe_mask_to_bool(mask)
+        color = np.random.randint(0, 255, 3).tolist()
+        filtered_seg_vis[mask_bool] = filtered_seg_vis[mask_bool] * 0.8 + np.array(color) * 0.2
+    axes[0, 1].imshow(filtered_seg_vis)
+    axes[0, 1].set_title(f'筛选后结果 ({len(filtered_annotations)}个)', fontsize=12, fontweight='bold')
+    axes[0, 1].axis('off')
+    
+    # 3. 筛选统计信息
+    axes[1, 0].axis('off')
+    stats_text = f"""
+    分割筛选统计:
+    
+    原始分割数量: {len(all_annotations)}
+    筛选后数量: {len(filtered_annotations)}
+    筛选率: {len(filtered_annotations)/len(all_annotations)*100:.1f}%
+    
+    筛选条件:
+    - 面积范围: 1000-50000
+    - 宽高比: 0.5-2.0
+    - 深度标准差: < 0.1
+    - 实心度: > 0.7
+    """
+    axes[1, 0].text(0.1, 0.9, stats_text, transform=axes[1, 0].transAxes, 
+                    fontsize=10, verticalalignment='top', fontfamily='monospace')
+    
+    # 4. 筛选后的详细信息
+    axes[1, 1].axis('off')
+    if len(filtered_annotations) > 0:
+        detail_text = "筛选后的对象详情:\n\n"
+        for i, annotation in enumerate(filtered_annotations):
+            detail_text += f"对象 {i+1}:\n"
+            detail_text += f"  面积: {annotation['area']:.0f}\n"
+            detail_text += f"  宽高比: {annotation['aspect_ratio']:.2f}\n"
+            detail_text += f"  深度均值: {annotation['depth_mean']:.3f}\n"
+            detail_text += f"  深度标准差: {annotation['depth_std']:.3f}\n"
+            detail_text += f"  实心度: {annotation['solidity']:.3f}\n\n"
+    else:
+        detail_text = "没有对象通过筛选条件"
+    
+    axes[1, 1].text(0.1, 0.9, detail_text, transform=axes[1, 1].transAxes, 
+                    fontsize=9, verticalalignment='top', fontfamily='monospace')
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存结果
+    process_output_path = output_dir + base_name + "_segmentation_process.png"
+    plt.savefig(process_output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return process_output_path
+
+
 def visualize_results(rgb_img, depth_img, annotations, corners_list, output_path):
     """可视化结果"""
     # 创建RGB可视化
@@ -220,8 +423,9 @@ def visualize_results(rgb_img, depth_img, annotations, corners_list, output_path
     # 绘制分割结果
     for i, annotation in enumerate(annotations):
         mask = annotation['segmentation']
+        mask_bool = safe_mask_to_bool(mask)
         color = np.random.randint(0, 255, 3).tolist()
-        rgb_vis[mask] = rgb_vis[mask] * 0.7 + np.array(color) * 0.3
+        rgb_vis[mask_bool] = rgb_vis[mask_bool] * 0.7 + np.array(color) * 0.3
     
     # 绘制角点
     for corners in corners_list:
@@ -274,8 +478,8 @@ def main(args):
     
     # 解析结果
     print("=== FastSAM Results Analysis ===")
-    # print(f"检测到的对象数量: {len(everything_results.boxes.data)}")
-    print(f"图像尺寸: {everything_results.orig_shape}")
+    print(f"检测到的对象数量: {len(everything_results[0].boxes.data)}")
+    print(f"图像尺寸: {everything_results[0].orig_shape}")
     
     # 处理分割结果
     prompt_process = FastSAMPrompt(input_pil, everything_results, device=args.device)
@@ -284,10 +488,11 @@ def main(args):
     # 格式化结果
     annotations = []
     for i, mask in enumerate(ann):
+        mask_np = safe_mask_to_numpy(mask)
         annotation = {
             'id': i,
-            'segmentation': mask,
-            'area': np.sum(mask)
+            'segmentation': mask,  # 保持原始mask用于后续处理
+            'area': np.sum(mask_np)
         }
         annotations.append(annotation)
     
@@ -303,6 +508,13 @@ def main(args):
               f"深度均值={annotation['depth_mean']:.3f}, "
               f"深度标准差={annotation['depth_std']:.3f}, "
               f"实心度={annotation['solidity']:.3f}")
+    
+    # 创建分割过程可视化
+    if len(filtered_annotations) > 0:
+        segmentation_process_path = create_segmentation_process_visualization(
+            rgb_img, annotations, filtered_annotations, args.output, args.img_path.split("/")[-1].replace('.jpg', '')
+        )
+        print(f"分割过程可视化已保存到: {segmentation_process_path}")
     
     # 找到角点
     print("\n=== 角点检测 ===")
@@ -326,6 +538,12 @@ def main(args):
     print("\n=== 保存结果 ===")
     base_name = args.img_path.split("/")[-1].replace('.jpg', '')
     
+    # 创建综合可视化
+    comprehensive_path = create_comprehensive_visualization(
+        rgb_img, depth_img, filtered_annotations, corners_list, args.output, base_name
+    )
+    print(f"综合可视化结果已保存到: {comprehensive_path}")
+    
     # 保存RGB可视化结果
     rgb_output_path = args.output + base_name + "_cube_corners.jpg"
     rgb_vis = visualize_results(rgb_img, depth_img, filtered_annotations, corners_list, rgb_output_path)
@@ -343,6 +561,39 @@ def main(args):
     depth_output_path = args.output + base_name + "_depth.jpg"
     cv2.imwrite(depth_output_path, depth_vis)
     print(f"深度图已保存到: {depth_output_path}")
+    
+    # 保存最终结果的大图
+    final_large_path = args.output + base_name + "_final_result_large.png"
+    plt.figure(figsize=(20, 15))
+    plt.imshow(rgb_vis)
+    plt.title(f'立方体检测最终结果 - {base_name}', fontsize=18, fontweight='bold')
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(final_large_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"最终结果大图已保存到: {final_large_path}")
+    
+    # 显示生成的文件总结
+    print("\n=== 生成的文件总结 ===")
+    generated_files = [
+        comprehensive_path,
+        rgb_output_path,
+        depth_output_path,
+        final_large_path
+    ]
+    
+    if len(filtered_annotations) > 0:
+        generated_files.append(segmentation_process_path)
+        for i, corner_vis in enumerate(corner_vis_list):
+            if corner_vis is not None:
+                corner_output_path = args.output + base_name + f"_corners_{i+1}.jpg"
+                generated_files.append(corner_output_path)
+    
+    for i, file_path in enumerate(generated_files, 1):
+        print(f"{i}. {file_path}")
+    
+    print(f"\n总共生成了 {len(generated_files)} 个可视化文件")
+    print("所有可视化结果已保存完成，请查看输出目录中的图像文件")
     
     print("\n=== 处理完成 ===")
 
