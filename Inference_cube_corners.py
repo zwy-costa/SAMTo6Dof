@@ -97,6 +97,59 @@ def safe_mask_to_bool(mask):
     return mask_np.astype(bool)
 
 
+def check_corners_in_box_prompt(corners, box_prompt):
+    """检查角点是否都在指定的box_prompt范围内"""
+    if corners is None or len(corners) != 4:
+        return False
+    
+    try:
+        # 解析box_prompt
+        if isinstance(box_prompt, str):
+            box_prompt = ast.literal_eval(box_prompt)
+        
+        # 支持多个box的情况，检查是否在任何一个box内
+        if isinstance(box_prompt, list):
+            for box in box_prompt:
+                if len(box) == 4:  # [x, y, w, h] 格式
+                    x, y, w, h = box
+                    x2, y2 = x + w, y + h
+                    
+                    # 检查所有角点是否都在这个box内
+                    all_in_box = True
+                    for corner in corners:
+                        cx, cy = corner
+                        if not (x <= cx <= x2 and y <= cy <= y2):
+                            all_in_box = False
+                            break
+                    
+                    if all_in_box:
+                        return True
+        
+        return False
+        
+    except:
+        return False
+
+
+def find_corners_in_box_prompt(corners_list, box_prompt):
+    """在box_prompt范围内找到完整的四个角点"""
+    if box_prompt is None or box_prompt == "[[0,0,0,0]]":
+        return None
+    
+    print(f"\n=== 在box_prompt范围内查找角点 ===")
+    print(f"box_prompt: {box_prompt}")
+    
+    # 检查每个检测到的角点集合
+    for i, corners in enumerate(corners_list):
+        if corners is not None and len(corners) == 4:
+            if check_corners_in_box_prompt(corners, box_prompt):
+                print(f"找到符合条件的角点集合 {i+1}: {corners}")
+                return corners
+    
+    print("未找到完全在box_prompt范围内的角点集合")
+    return None
+
+
 def optimize_parallelogram_fit(points, mask_np):
     """优化平行四边形拟合，使其更符合立方体上立面的特征（透视变形下的平行四边形）"""
     if len(points) < 4:
@@ -416,6 +469,7 @@ def find_cube_corners(mask, depth_img, bbox_points=None, visualize=True):
         
         # 使用优化的平行四边形拟合
         bbox_points = optimize_parallelogram_fit(points, mask_np)
+        # bbox_points = find_corners_by_corner_detection(points, mask_np)
         if bbox_points is None:
             return None, None
         
@@ -828,6 +882,69 @@ def create_segmentation_process_visualization(rgb_img, all_annotations, filtered
     return process_output_path
 
 
+def visualize_box_prompt_result(rgb_img, box_prompt, selected_corners, output_path):
+    """可视化box_prompt和选中的角点"""
+    vis_img = rgb_img.copy()
+    
+    try:
+        # 解析box_prompt
+        if isinstance(box_prompt, str):
+            box_prompt = ast.literal_eval(box_prompt)
+        
+        # 绘制所有box_prompt区域
+        if isinstance(box_prompt, list):
+            for i, box in enumerate(box_prompt):
+                if len(box) == 4:  # [x, y, w, h] 格式
+                    x, y, w, h = box
+                    x2, y2 = x + w, y + h
+                    
+                    # 绘制box_prompt区域（半透明蓝色）
+                    overlay = vis_img.copy()
+                    cv2.rectangle(overlay, (int(x), int(y)), (int(x2), int(y2)), (255, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.3, vis_img, 0.7, 0, vis_img)
+                    
+                    # 绘制box_prompt边界（蓝色）
+                    cv2.rectangle(vis_img, (int(x), int(y)), (int(x2), int(y2)), (255, 0, 0), 2)
+                    
+                    # 标注box编号
+                    cv2.putText(vis_img, f"Box {i+1}", (int(x), int(y)-10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+        
+        # 绘制选中的角点
+        if selected_corners is not None:
+            for i, (x, y) in enumerate(selected_corners):
+                # 绘制角点（绿色圆圈）
+                cv2.circle(vis_img, (int(x), int(y)), 12, (0, 255, 0), -1)
+                cv2.circle(vis_img, (int(x), int(y)), 12, (255, 255, 255), 2)
+                
+                # 标注角点编号
+                cv2.putText(vis_img, str(i+1), (int(x)+15, int(y)-15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            
+            # 绘制角点之间的连线（绿色）
+            for i in range(4):
+                pt1 = selected_corners[i]
+                pt2 = selected_corners[(i+1) % 4]
+                cv2.line(vis_img, (int(pt1[0]), int(pt1[1])), 
+                        (int(pt2[0]), int(pt2[1])), (0, 255, 0), 3)
+            
+            # 添加标题
+            cv2.putText(vis_img, "Selected Corners in Box Prompt", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        else:
+            # 添加标题
+            cv2.putText(vis_img, "No Corners Found in Box Prompt", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+    
+    except Exception as e:
+        print(f"可视化box_prompt时出错: {e}")
+    
+    # 保存结果
+    cv2.imwrite(output_path, cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
+    
+    return vis_img
+
+
 def visualize_results(rgb_img, depth_img, annotations, corners_list, output_path):
     """可视化结果"""
     # 创建RGB可视化
@@ -896,6 +1013,7 @@ def simple_segmentation_visualization(rgb_img, annotations, output_dir, base_nam
 def main(args):
     # 加载模型
     model = FastSAM(args.model_path)
+    args.box_prompt = convert_box_xywh_to_xyxy(ast.literal_eval(args.box_prompt))
     
     # 加载RGB图像（使用PIL，与原始脚本一致）
     input_pil = Image.open(args.img_path)
@@ -1009,6 +1127,35 @@ def main(args):
         else:
             print(f"  分割 {i+1}: 未找到有效角点")
             corners_list.append(None)
+
+
+    # 输出指定box_prompt范围内完整的四个角点做为结果
+    if args.box_prompt is not None:
+        # 在box_prompt范围内查找符合条件的角点
+        selected_corners = find_corners_in_box_prompt(corners_list, args.box_prompt)
+        
+        if selected_corners is not None:
+            print(f"\n=== 最终结果 ===")
+            print(f"在box_prompt范围内找到的角点: {selected_corners}")
+            
+            # 保存最终结果到文件
+            result_file = args.output + base_name + "_final_corners.txt"
+            with open(result_file, 'w') as f:
+                f.write("Final corners in box_prompt:\n")
+                for i, corner in enumerate(selected_corners):
+                    f.write(f"Corner {i+1}: ({corner[0]}, {corner[1]})\n")
+            print(f"最终角点结果已保存到: {result_file}")
+            
+            # 可视化box_prompt和选中的角点
+            box_prompt_vis_path = args.output + base_name + "_box_prompt_result.jpg"
+            box_prompt_vis = visualize_box_prompt_result(rgb_img, args.box_prompt, selected_corners, box_prompt_vis_path)
+            print(f"box_prompt结果可视化已保存到: {box_prompt_vis_path}")
+        else:
+            print(f"\n=== 结果 ===")
+            print("未在box_prompt范围内找到完整的四个角点")
+        
+
+
     
     # 可视化结果
     print("\n=== 保存结果 ===")
@@ -1058,6 +1205,13 @@ def main(args):
         depth_output_path,
         final_large_path
     ]
+    
+    # 添加box_prompt相关文件
+    if args.box_prompt is not None and args.box_prompt != "[[0,0,0,0]]":
+        result_file = args.output + base_name + "_final_corners.txt"
+        box_prompt_vis_path = args.output + base_name + "_box_prompt_result.jpg"
+        generated_files.append(result_file)
+        generated_files.append(box_prompt_vis_path)
     
     if len(filtered_annotations) > 0:
         generated_files.append(segmentation_process_path)
