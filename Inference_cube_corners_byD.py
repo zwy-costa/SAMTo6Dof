@@ -1401,24 +1401,32 @@ def visualize_box_prompt_result(rgb_img, box_prompt, selected_corners, output_pa
         if isinstance(box_prompt, str):
             box_prompt = ast.literal_eval(box_prompt)
         
-        # 绘制所有box_prompt区域
-        if isinstance(box_prompt, list):
-            for i, box in enumerate(box_prompt):
-                if len(box) == 4:  # [x, y, w, h] 格式
-                    x, y, w, h = box
-                    x2, y2 = x + w, y + h
-                    
-                    # 绘制box_prompt区域（半透明蓝色）
-                    overlay = vis_img.copy()
-                    cv2.rectangle(overlay, (int(x), int(y)), (int(x2), int(y2)), (255, 0, 0), -1)
-                    cv2.addWeighted(overlay, 0.3, vis_img, 0.7, 0, vis_img)
-                    
-                    # 绘制box_prompt边界（蓝色）
-                    cv2.rectangle(vis_img, (int(x), int(y)), (int(x2), int(y2)), (255, 0, 0), 2)
-                    
-                    # 标注box编号
-                    cv2.putText(vis_img, f"Box {i+1}", (int(x), int(y)-10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+        # 绘制box_prompt区域
+        if isinstance(box_prompt, list) and len(box_prompt) == 4:  # [x, y, x2, y2] 格式
+            x, y, x2, y2 = box_prompt
+            
+            # 绘制box_prompt区域（半透明蓝色）
+            overlay = vis_img.copy()
+            cv2.rectangle(overlay, (int(x), int(y)), (int(x2), int(y2)), (255, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.3, vis_img, 0.7, 0, vis_img)
+            
+            # 绘制box_prompt边界（蓝色）
+            cv2.rectangle(vis_img, (int(x), int(y)), (int(x2), int(y2)), (255, 0, 0), 2)
+            
+            # 绘制左上角点和右下角点
+            cv2.circle(vis_img, (int(x), int(y)), 8, (0, 255, 255), -1)  # 左上角点（黄色）
+            cv2.circle(vis_img, (int(x), int(y)), 8, (255, 255, 255), 2)  # 白色边框
+            cv2.putText(vis_img, "TL", (int(x)+10, int(y)-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            cv2.circle(vis_img, (int(x2), int(y2)), 8, (0, 255, 255), -1)  # 右下角点（黄色）
+            cv2.circle(vis_img, (int(x2), int(y2)), 8, (255, 255, 255), 2)  # 白色边框
+            cv2.putText(vis_img, "BR", (int(x2)+10, int(y2)-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            # 标注box
+            cv2.putText(vis_img, "Box Prompt", (int(x), int(y)-30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         
         # 绘制选中的角点
         if selected_corners is not None:
@@ -1702,7 +1710,7 @@ def main(args):
                 print(f"\n=== 3D变换求解 ===")
                 
                 # 获取角点的3D相机坐标
-                print(f"获取角点深度信息...")
+                print(f"获取角点深度信息，并计算角点的3D相机坐标")
                 result = get_corner_depths(selected_corners, depth_img, K, dist_coeffs)
                 
                 if result is not None:
@@ -1715,13 +1723,7 @@ def main(args):
                     half_height = height_mm / 2.0
                     
                     # 假设角点顺序为：左上、右上、右下、左下（顺时针）
-                    # 左上角点改为 [half_width, half_height, 0]
-                    # corners_3d_object = np.array([
-                    #     [half_width, half_height, 0],    # 左上
-                    #     [-half_width, half_height, 0],   # 右上
-                    #     [-half_width, -half_height, 0],  # 右下
-                    #     [half_width, -half_height, 0]    # 左下
-                    # ], dtype=np.float32)
+                    # 这里默认了Magazine是竖直放置的，如果是水平放置，需要进行修改。
                     corners_3d_object = np.array([
                         [-half_width, -half_height, 0],    # 左上
                         [half_width, -half_height, 0],   # 右上
