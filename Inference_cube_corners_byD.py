@@ -269,6 +269,29 @@ def calculate_transform_error(points_camera, points_object, R, t):
     return mean_error, max_error, errors
 
 
+def calculate_center_in_camera_coordinates(R, t):
+    """计算上立面中心点在相机坐标系中的坐标"""
+    # 上立面中心点在物体坐标系中的坐标（原点）
+    center_object = np.array([0, 0, 0])
+    
+    # 转换到相机坐标系
+    center_camera = R @ center_object + t
+    
+    return center_camera
+
+
+def calculate_camera_center_in_object_coordinates(R, t):
+    """计算相机中心在上立面中心点坐标系中的坐标"""
+    # 相机中心在相机坐标系中的坐标（原点）
+    camera_center_camera = np.array([0, 0, 0])
+    
+    # 转换到物体坐标系：object_coord = R^T * (camera_coord - t)
+    R_inv = R.T
+    camera_center_object = R_inv @ (camera_center_camera - t)
+    
+    return camera_center_object
+
+
 def visualize_3d_transform(rgb_img, corners_2d, corners_3d_camera, corners_3d_object, R, t, output_path, depth_validity=None):
     """可视化3D变换结果"""
     vis_img = rgb_img.copy()
@@ -1693,11 +1716,17 @@ def main(args):
                     
                     # 假设角点顺序为：左上、右上、右下、左下（顺时针）
                     # 左上角点改为 [half_width, half_height, 0]
+                    # corners_3d_object = np.array([
+                    #     [half_width, half_height, 0],    # 左上
+                    #     [-half_width, half_height, 0],   # 右上
+                    #     [-half_width, -half_height, 0],  # 右下
+                    #     [half_width, -half_height, 0]    # 左下
+                    # ], dtype=np.float32)
                     corners_3d_object = np.array([
-                        [half_width, half_height, 0],    # 左上
-                        [-half_width, half_height, 0],   # 右上
-                        [-half_width, -half_height, 0],  # 右下
-                        [half_width, -half_height, 0]    # 左下
+                        [-half_width, -half_height, 0],    # 左上
+                        [half_width, -half_height, 0],   # 右上
+                        [half_width, half_height, 0],  # 右下
+                        [-half_width, half_height, 0]    # 左下
                     ], dtype=np.float32)
                     
                     print(f"立方体上立面尺寸: {width_mm}m x {height_mm}m")
@@ -1715,6 +1744,14 @@ def main(args):
                         print(f"{R}")
                         print(f"平移向量t: [{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}] m")
                         
+                        # 计算上立面中心点在相机坐标系中的坐标
+                        center_camera = calculate_center_in_camera_coordinates(R, t)
+                        print(f"上立面中心点在相机坐标系中的坐标: [{center_camera[0]:.3f}, {center_camera[1]:.3f}, {center_camera[2]:.3f}] m")
+                        
+                        # 计算相机中心在上立面中心点坐标系中的坐标
+                        camera_center_object = calculate_camera_center_in_object_coordinates(R, t)
+                        print(f"相机中心在上立面中心点坐标系中的坐标: [{camera_center_object[0]:.3f}, {camera_center_object[1]:.3f}, {camera_center_object[2]:.3f}] m")
+
                         # 计算变换误差
                         mean_error, max_error, errors = calculate_transform_error(corners_3d_camera, corners_3d_object, R, t)
                         print(f"变换误差:")
@@ -1731,6 +1768,8 @@ def main(args):
                             for i in range(3):
                                 f.write(f"  [{R[i,0]:.6f}, {R[i,1]:.6f}, {R[i,2]:.6f}]\n")
                             f.write(f"Translation Vector t: [{t[0]:.6f}, {t[1]:.6f}, {t[2]:.6f}] m\n")
+                            f.write(f"Center Point in Camera Coordinates: [{center_camera[0]:.6f}, {center_camera[1]:.6f}, {center_camera[2]:.6f}] m\n")
+                            f.write(f"Camera Center in Object Coordinates: [{camera_center_object[0]:.6f}, {camera_center_object[1]:.6f}, {camera_center_object[2]:.6f}] m\n")
                             f.write(f"Mean Error: {mean_error:.6f} m\n")
                             f.write(f"Max Error: {max_error:.6f} m\n")
                         print(f"3D变换结果已保存到: {transform_result_file}")
