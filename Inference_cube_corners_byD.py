@@ -92,7 +92,11 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
         if valid_depths:
             # 第二步：根据中心点深度筛选异常值
             if center_depth_mean is not None and center_depth_std is not None:
-                tolerance = 8 * center_depth_std  # 使用5倍标准差作为筛选标准
+                # 根据center_depth_std动态设置tolerance
+                if center_depth_std >= 0.02:
+                    tolerance = 15 * center_depth_std
+                else:
+                    tolerance = 30 * center_depth_std
                 for depth in valid_depths:
                     if abs(depth - center_depth_mean) <= tolerance:
                         filtered_depths.append(depth)
@@ -107,7 +111,8 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
                     print(f"    筛选后估计深度: {estimated_depth:.3f}")
                 else:
                     # 如果筛选后没有深度值，使用中心点深度
-                    print(f"    筛选后无有效深度值，使用中心点深度: {center_depth_mean:.3f}")
+                    print(f"   收集到的深度范围: {min(valid_depths):.3f} ~ {max(valid_depths):.3f}")            
+                    print(f" ×××××筛选后无有效深度值，使用中心点深度: {center_depth_mean:.3f}")
                     estimated_depth = center_depth_mean
             else:
                 # 如果没有中心点参考，使用原始方法
@@ -138,7 +143,7 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
             if is_valid_depth(depth):
                 # 深度有效，检查是否与中心点深度相近
                 if center_depth_mean is not None:
-                    tolerance = 8 * center_depth_std  # 使用更严格的标准
+                    tolerance = 12 * center_depth_std  # 使用更严格的标准 (其他地方是15)
                     if abs(depth - center_depth_mean) > tolerance:
                         print(f"  角点 {i+1}: 直接深度 {depth:.3f} 与中心点深度差异较大 (差异: {abs(depth - center_depth_mean):.3f})，尝试重新估计...")
                         estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std)
@@ -198,7 +203,11 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
         print(f"  中心点深度标准差: {center_depth_std:.3f}")
         
         # 检查每个角点深度与中心点深度的差异
-        tolerance = 8 * center_depth_std
+        # 根据center_depth_std动态设置tolerance
+        if center_depth_std >= 0.02:
+            tolerance = 15 * center_depth_std
+        else:
+            tolerance = 30 * center_depth_std
         consistent_count = 0
         for i, depth in enumerate(all_depths):
             diff = abs(depth - center_depth_mean)
@@ -460,8 +469,8 @@ def visualize_depth_filtering(rgb_img, corners_2d, depth_img, center_depth_mean,
     # 绘制中心点（红色）
     cv2.circle(depth_vis, (center_x, center_y), 20, (0, 0, 255), -1)
     cv2.circle(depth_vis, (center_x, center_y), 20, (255, 255, 255), 2)
-    cv2.putText(depth_vis, "Center", (center_x+25, center_y-25), 
-               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    # cv2.putText(depth_vis, "Center", (center_x+25, center_y-25), 
+    #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
     # 显示中心点深度信息
     if 0 <= center_x < depth_img.shape[1] and 0 <= center_y < depth_img.shape[0]:
@@ -470,7 +479,11 @@ def visualize_depth_filtering(rgb_img, corners_2d, depth_img, center_depth_mean,
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
     # 绘制筛选区域
-    tolerance = 8 * center_depth_std
+    # 根据center_depth_std动态设置tolerance
+    if center_depth_std >= 0.02:
+        tolerance = 15 * center_depth_std
+    else:
+        tolerance = 30 * center_depth_std
     for i, (x, y) in enumerate(corners_2d):
         x, y = int(x), int(y)
         if 0 <= x < depth_img.shape[1] and 0 <= y < depth_img.shape[0]:
@@ -487,9 +500,9 @@ def visualize_depth_filtering(rgb_img, corners_2d, depth_img, center_depth_mean,
                 color = (0, 255, 0)
                 status = "OK"
             else:
-                # 超出筛选范围：红色
+                # 采用周围筛选深度 计算的平均值：红色 
                 color = (0, 0, 255)
-                status = "OUT"
+                status = "MEAN"
             
             cv2.circle(depth_vis, (x, y), 15, color, -1)
             cv2.circle(depth_vis, (x, y), 15, (255, 255, 255), 2)
@@ -558,7 +571,7 @@ def parse_args():
         "--output", type=str, default="./output/", help="image save path"
     )
     parser.add_argument(
-        "--box_prompt", type=str, default="[[0,0,0,0]]", help="[[x,y,w,h],[x2,y2,w2,h2]] support multiple boxes"
+        "--box_prompt", type=str, default=None, help="[[x,y,w,h],[x2,y2,w2,h2]] support multiple boxes"
     )
     parser.add_argument(
         "--better_quality",
@@ -643,21 +656,29 @@ def check_corners_in_box_prompt(corners, box_prompt):
 
 def find_corners_in_box_prompt(corners_list, box_prompt):
     """在box_prompt范围内找到完整的四个角点"""
-    if box_prompt is None or box_prompt == "[[0,0,0,0]]":
+    if box_prompt is None:
         return None
     
     print(f"\n=== 在box_prompt范围内查找角点 ===")
     print(f"box_prompt: {box_prompt}")
     
     # 检查每个检测到的角点集合
+    valid_corners = []
     for i, corners in enumerate(corners_list):
         if corners is not None and len(corners) == 4:
             if check_corners_in_box_prompt(corners, box_prompt):
                 print(f"找到符合条件的角点集合 {i+1}: {corners}")
-                return corners
+                valid_corners.append(corners)
     
-    print("未找到完全在box_prompt范围内的角点集合")
-    return None
+    # 检查是否找到多个符合条件的角点集合
+    if len(valid_corners) > 1:
+        print(f"错误: 检测到多个边框，找到 {len(valid_corners)} 个符合条件的角点集合")
+        return None
+    elif len(valid_corners) == 1:
+        return valid_corners[0]
+    else:
+        print("未找到完全在box_prompt范围内的角点集合")
+        return None
 
 
 def optimize_parallelogram_fit(points, mask_np):
@@ -674,15 +695,21 @@ def optimize_parallelogram_fit(points, mask_np):
         if len(hull_points) == 4:
             return hull_points
         elif len(hull_points) > 4:
-            # 遍历所有点，选择最接近平行四边形的4个点
-            best_points = select_best_parallelogram_points(hull_points)
-            # 计算拟合质量
-            bbox_array = np.array(best_points)
+            # 计算掩码面积
             mask_area = np.sum(mask_np)
-            bbox_area = cv2.contourArea(bbox_array)
-            fit_quality = mask_area / bbox_area if bbox_area > 0 else 0
-            if abs(fit_quality - 1) < 0.5:
-                return best_points
+            
+            # 遍历所有点，选择最接近平行四边形的4个点
+            best_points = select_best_parallelogram_points(hull_points, mask_area)
+            
+            if best_points is not None:
+                # 计算拟合质量
+                bbox_array = np.array(best_points)
+                bbox_area = cv2.contourArea(bbox_array)
+                fit_quality = mask_area / bbox_area if bbox_area > 0 else 0
+                if abs(fit_quality - 1) < 0.5:
+                    return best_points
+                else:
+                    return None
             else:
                 return None
     except:
@@ -727,7 +754,7 @@ def optimize_parallelogram_fit(points, mask_np):
     return None
 
 
-def select_best_parallelogram_points(points):
+def select_best_parallelogram_points(points, bbox_area=None):
     """从多个点中选择最接近平行四边形的4个点"""
     if len(points) <= 4:
         return points[:4]
@@ -741,7 +768,7 @@ def select_best_parallelogram_points(points):
         combo = np.array(combo)
         
         # 计算平行四边形特征评分
-        score = calculate_parallelogram_score(combo)
+        score = calculate_parallelogram_score(combo, bbox_area)
         if score < best_score:
             best_score = score
             best_points = combo
@@ -749,7 +776,7 @@ def select_best_parallelogram_points(points):
     return best_points if best_points is not None else points[:4]
 
 
-def calculate_parallelogram_score(points):
+def calculate_parallelogram_score(points, bbox_area=None):
     """计算4个点构成平行四边形的质量评分（分数越低越好）"""
     if len(points) != 4:
         return float('inf')
@@ -787,12 +814,24 @@ def calculate_parallelogram_score(points):
     else:
         compactness_score = 1.0
     
+    # 5. 重叠性指标（与原始掩码的重叠程度）
+    overlap_score = 0
+    if bbox_area is not None and bbox_area > 0:
+        # 计算重叠比例，理想情况下应该接近1
+        overlap_ratio = area / bbox_area
+        # 如果重叠比例偏离1太多，增加惩罚
+        overlap_score = abs(overlap_ratio - 1.0)
+    else:
+        overlap_score = 0.5  # 默认惩罚值
+    
     # 综合评分（权重可调整）
     total_score = (
         angle_consistency_score * 2.0 +      # 对角度数一致性最重要
         edge_consistency_score * 1.5 +       # 对边长度一致性次之
         angle_reasonableness * 0.5 +         # 角度合理性
-        compactness_score * 1.0              # 紧凑度
+        compactness_score * 1.0 +            # 紧凑度
+        # overlap_score * 1000.0                 # 重叠性指标
+        overlap_score * 100.0                 # 重叠性指标
     )
     
     return total_score
@@ -852,7 +891,6 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
         if len(y_coords) == 0:
             continue
         
-        # 使用优化的平行四边形拟合，采用多种方法确保准确性
         points = np.column_stack((x_coords, y_coords))
         if len(points) < 4:
             continue
@@ -910,6 +948,81 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
             
             # 检查深度变化（立方体上立面应该有较小的深度变化，但允许透视变形）
             if depth_std > 0.15:  # 允许更大的深度变化，适应透视效果
+                continue
+            
+            # 检查四个角点深度信息与中心点深度信息的差异
+            # 使用四个角点计算出的中心点
+            center_x = np.mean([point[0] for point in bbox_points])
+            center_y = np.mean([point[1] for point in bbox_points])
+            center_x, center_y = int(center_x), int(center_y)
+            
+            # 获取中心点周围一定范围内的有效深度值均值
+            search_radius = 5  # 搜索半径
+            center_depths = []
+            
+            for dy in range(-search_radius, search_radius + 1):
+                for dx in range(-search_radius, search_radius + 1):
+                    nx, ny = center_x + dx, center_y + dy
+                    if (0 <= nx < depth_img.shape[1] and 0 <= ny < depth_img.shape[0]):
+                        neighbor_depth = depth_img[ny, nx]
+                        if neighbor_depth > 0 and not np.isnan(neighbor_depth) and not np.isinf(neighbor_depth):
+                            center_depths.append(neighbor_depth)
+            
+            if len(center_depths) == 0:
+                print("  中心点周围无法获取有效深度值")
+                continue
+            
+            center_depth = np.mean(center_depths)
+            center_depth_std = np.std(center_depths)
+            print(f"  中心点深度均值: {center_depth:.3f}, 标准差: {center_depth_std:.3f} (基于{len(center_depths)}个有效像素)")
+            
+            # corner_depth_tolerance = 0.08  # 角点深度与中心点深度的允许差异阈值
+            if center_depth_std >= 0.02:
+                corner_depth_tolerance = 15 * center_depth_std
+            else:
+                corner_depth_tolerance = 30 * center_depth_std
+            
+            # 获取四个角点周围一定范围内的深度值并检查差异
+            corner_search_radius = 5  # 角点搜索半径
+            # corner_search_radius = 20
+            corner_depth_valid = True
+            
+            for i, point in enumerate(bbox_points):
+                x, y = int(point[0]), int(point[1])
+                corner_depths = []
+                
+                # 获取角点周围一定范围内的有效深度值
+                for dy in range(-corner_search_radius, corner_search_radius + 1):
+                    for dx in range(-corner_search_radius, corner_search_radius + 1):
+                        nx, ny = x + dx, y + dy
+                        if (0 <= nx < depth_img.shape[1] and 0 <= ny < depth_img.shape[0]):
+                            neighbor_depth = depth_img[ny, nx]
+                            if neighbor_depth > 0 and not np.isnan(neighbor_depth) and not np.isinf(neighbor_depth):
+                                corner_depths.append(neighbor_depth)
+                
+                if len(corner_depths) == 0:
+                    print(f"  角点 {i+1} 周围无法获取有效深度值")
+                    corner_depth_valid = False
+                    break
+                
+                # 根据中心点深度筛选异常值
+                filtered_corner_depths = []
+                for depth in corner_depths:
+                    depth_diff = abs(depth - center_depth)
+                    if depth_diff <= corner_depth_tolerance:
+                        filtered_corner_depths.append(depth)
+                
+                # 如果筛选后没有有效深度值，说明角点附近所有值都与中心点差异很大
+                if len(filtered_corner_depths) == 0:
+                    print(f"  角点 {i+1} 附近所有深度值都与中心点差异过大 (收集到{len(corner_depths)}个深度值)")
+                    corner_depth_valid = False
+                    break
+                
+                # 计算筛选后的深度均值
+                corner_depth_mean = np.mean(filtered_corner_depths)
+                print(f"  角点 {i+1} 深度均值: {corner_depth_mean:.3f} (筛选后{len(filtered_corner_depths)}个有效值)")
+            
+            if not corner_depth_valid:
                 continue
             
             # 计算凸包
@@ -1556,7 +1669,10 @@ def main(args):
     
     # 加载模型
     model = FastSAM(args.model_path)
-    args.box_prompt = convert_box_xywh_to_xyxy(ast.literal_eval(args.box_prompt))
+    
+    # 解析box_prompt参数（如果提供）
+    if args.box_prompt is not None:
+        args.box_prompt = convert_box_xywh_to_xyxy(ast.literal_eval(args.box_prompt))
     
     # 加载RGB图像（使用PIL，与原始脚本一致）
     input_pil = Image.open(args.img_path)
@@ -1683,128 +1799,154 @@ def main(args):
             corners_list.append(None)
 
 
-    # 输出指定box_prompt范围内完整的四个角点做为结果
+    # 处理角点选择逻辑
+    selected_corners = None
+    
     if args.box_prompt is not None:
         # 在box_prompt范围内查找符合条件的角点
         selected_corners = find_corners_in_box_prompt(corners_list, args.box_prompt)
         
-        if selected_corners is not None:
-            print(f"\n=== 最终结果 ===")
-            print(f"在box_prompt范围内找到的角点: {selected_corners}")
-            
-            # 保存最终结果到文件
-            result_file = args.output + base_name + "_final_corners.txt"
-            with open(result_file, 'w') as f:
-                f.write("Final corners in box_prompt:\n")
-                for i, corner in enumerate(selected_corners):
-                    f.write(f"Corner {i+1}: ({corner[0]}, {corner[1]})\n")
-            print(f"最终角点结果已保存到: {result_file}")
-            
-            # 可视化box_prompt和选中的角点
-            box_prompt_vis_path = args.output + base_name + "_box_prompt_result.jpg"
-            box_prompt_vis = visualize_box_prompt_result(rgb_img, args.box_prompt, selected_corners, box_prompt_vis_path)
-            print(f"box_prompt结果可视化已保存到: {box_prompt_vis_path}")
-            
-            # 3D变换求解
-            if K is not None and dist_coeffs is not None:
-                print(f"\n=== 3D变换求解 ===")
-                
-                # 获取角点的3D相机坐标
-                print(f"获取角点深度信息，并计算角点的3D相机坐标")
-                result = get_corner_depths(selected_corners, depth_img, K, dist_coeffs)
-                
-                if result is not None:
-                    corners_3d_camera, depth_validity, center_depth_mean, center_depth_std = result
-                    # 构建立方体上立面的3D物体坐标（以中心为原点，右手坐标系）
-                    # 已知立方体上立面长宽是117mm*60mm
-                    width_mm = 0.117
-                    height_mm = 0.06
-                    half_width = width_mm / 2.0
-                    half_height = height_mm / 2.0
-                    
-                    # 假设角点顺序为：左上、右上、右下、左下（顺时针）
-                    # 这里默认了Magazine是竖直放置的，如果是水平放置，需要进行修改。
-                    corners_3d_object = np.array([
-                        [-half_width, -half_height, 0],    # 左上
-                        [half_width, -half_height, 0],   # 右上
-                        [half_width, half_height, 0],  # 右下
-                        [-half_width, half_height, 0]    # 左下
-                    ], dtype=np.float32)
-                    
-                    print(f"立方体上立面尺寸: {width_mm}m x {height_mm}m")
-                    print(f"物体坐标系角点:")
-                    for i, corner in enumerate(corners_3d_object):
-                        print(f"  角点 {i+1}: ({corner[0]:.3f}, {corner[1]:.3f}, {corner[2]:.3f}) m")
-                    
-                    # 使用SVD方法求解刚体变换
-                    print(f"\n使用SVD方法求解刚体变换...")
-                    R, t = solve_rigid_transform_svd(corners_3d_camera, corners_3d_object)
-                    
-                    if R is not None and t is not None:
-                        print(f"SVD求解成功!")
-                        print(f"旋转矩阵R:")
-                        print(f"{R}")
-                        print(f"平移向量t: [{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}] m")
-                        
-                        # 计算上立面中心点在相机坐标系中的坐标
-                        center_camera = calculate_center_in_camera_coordinates(R, t)
-                        print(f"上立面中心点在相机坐标系中的坐标: [{center_camera[0]:.3f}, {center_camera[1]:.3f}, {center_camera[2]:.3f}] m")
-                        
-                        # 计算相机中心在上立面中心点坐标系中的坐标
-                        camera_center_object = calculate_camera_center_in_object_coordinates(R, t)
-                        print(f"相机中心在上立面中心点坐标系中的坐标: [{camera_center_object[0]:.3f}, {camera_center_object[1]:.3f}, {camera_center_object[2]:.3f}] m")
-
-                        # 计算变换误差
-                        mean_error, max_error, errors = calculate_transform_error(corners_3d_camera, corners_3d_object, R, t)
-                        print(f"变换误差:")
-                        print(f"  平均误差: {mean_error:.3f} m")
-                        print(f"  最大误差: {max_error:.3f} m")
-                        for i, error in enumerate(errors):
-                            print(f"  角点 {i+1} 误差: {error:.3f} m")
-                        
-                        # 保存3D变换结果
-                        transform_result_file = args.output + base_name + "_3d_transform.txt"
-                        with open(transform_result_file, 'w') as f:
-                            f.write("3D Transform Results:\n")
-                            f.write(f"Rotation Matrix R:\n")
-                            for i in range(3):
-                                f.write(f"  [{R[i,0]:.6f}, {R[i,1]:.6f}, {R[i,2]:.6f}]\n")
-                            f.write(f"Translation Vector t: [{t[0]:.6f}, {t[1]:.6f}, {t[2]:.6f}] m\n")
-                            f.write(f"Center Point in Camera Coordinates: [{center_camera[0]:.6f}, {center_camera[1]:.6f}, {center_camera[2]:.6f}] m\n")
-                            f.write(f"Camera Center in Object Coordinates: [{camera_center_object[0]:.6f}, {camera_center_object[1]:.6f}, {camera_center_object[2]:.6f}] m\n")
-                            f.write(f"Mean Error: {mean_error:.6f} m\n")
-                            f.write(f"Max Error: {max_error:.6f} m\n")
-                        print(f"3D变换结果已保存到: {transform_result_file}")
-                        
-                        # 可视化深度估计结果
-                        depth_estimation_vis_path = args.output + base_name + "_depth_estimation_result.jpg"
-                        depth_estimation_vis = visualize_depth_estimation(rgb_img, selected_corners, depth_img, depth_validity, depth_estimation_vis_path)
-                        print(f"深度估计结果可视化已保存到: {depth_estimation_vis_path}")
-                        
-                        # 可视化深度筛选过程
-                        depth_filtering_vis_path = args.output + base_name + "_depth_filtering_process.jpg"
-                        depth_filtering_vis = visualize_depth_filtering(rgb_img, selected_corners, depth_img, center_depth_mean, center_depth_std, depth_filtering_vis_path)
-                        print(f"深度筛选过程可视化已保存到: {depth_filtering_vis_path}")
-                        
-                        # 可视化3D变换结果
-                        transform_vis_path = args.output + base_name + "_3d_transform_result.jpg"
-                        transform_vis = visualize_3d_transform(rgb_img, selected_corners, corners_3d_camera, corners_3d_object, R, t, transform_vis_path, depth_validity)
-                        print(f"3D变换结果可视化已保存到: {transform_vis_path}")
-                        
-                    else:
-                        print(f"SVD求解失败")
-                else:
-                    print(f"无法获取角点深度信息")
-            else:
-                print(f"相机内参未加载，跳过3D变换求解")
-        else:
-            print(f"\n=== 结果 ===")
-            print("未在box_prompt范围内找到完整的四个角点")
-
-    
+        if selected_corners is None:
+            print(f"\n错误: 无法在box_prompt范围内找到有效的角点集合")
+            print(f"请检查以下可能的问题:")
+            print(f"1. box_prompt参数是否正确: {args.box_prompt}")
+            print(f"2. 图像中是否存在目标物体")
+            print(f"3. 分割算法是否正确检测到目标")
+            print(f"4. 角点检测算法是否正常工作")
+            return
+    else:
+        # 没有提供box_prompt，检查corners_list中是否只有一组角点
+        valid_corners = [corners for corners in corners_list if corners is not None]
         
+        if len(valid_corners) == 0:
+            print(f"\n错误: 没有检测到任何有效的角点集合")
+            print(f"请检查以下可能的问题:")
+            print(f"1. 图像中是否存在目标物体")
+            print(f"2. 分割算法是否正确检测到目标")
+            print(f"3. 角点检测算法是否正常工作")
+            return
+        elif len(valid_corners) > 1:
+            print(f"\n错误: 检测到多个边框，找到 {len(valid_corners)} 个角点集合")
+            print(f"请使用box_prompt参数缩小检测的边框范围，或者确保图像中只有一个目标物体")
+            return
+        else:
+            # 只有一组角点，使用它
+            selected_corners = valid_corners[0]
+            print(f"\n=== 未使用box_prompt,自动选择角点 ===")
+            print(f"检测到1组角点，自动选择: {selected_corners}")
+    
+    if selected_corners is not None:
+        print(f"\n=== 最终结果 ===")
+        if args.box_prompt is not None:
+            print(f"在box_prompt范围内找到的角点: {selected_corners}")
+        else:
+            print(f"自动选择的角点: {selected_corners}")
+        
+        # 保存最终结果到文件
+        result_file = args.output + base_name + "_final_corners.txt"
+        with open(result_file, 'w') as f:
+            f.write("Final corners:\n")
+            for i, corner in enumerate(selected_corners):
+                f.write(f"Corner {i+1}: ({corner[0]}, {corner[1]})\n")
+        print(f"最终角点结果已保存到: {result_file}")
+        
+        # 如果有box_prompt，可视化box_prompt和选中的角点
+        box_prompt_vis_path = args.output + base_name + "_box_prompt_result.jpg"
+        box_prompt_vis = visualize_box_prompt_result(rgb_img, args.box_prompt, selected_corners, box_prompt_vis_path)
+        print(f"box_prompt结果可视化已保存到: {box_prompt_vis_path}")
+        
+        # 3D变换求解
+        if K is not None and dist_coeffs is not None:
+            print(f"\n=== 3D变换求解 ===")
+            
+            # 获取角点的3D相机坐标
+            print(f"获取角点深度信息，并计算角点的3D相机坐标")
+            result = get_corner_depths(selected_corners, depth_img, K, dist_coeffs)
+            
+            if result is not None:
+                corners_3d_camera, depth_validity, center_depth_mean, center_depth_std = result
+                # 构建立方体上立面的3D物体坐标（以中心为原点，右手坐标系）
+                # 已知立方体上立面长宽是117mm*60mm
+                width_mm = 0.117
+                height_mm = 0.06
+                half_width = width_mm / 2.0
+                half_height = height_mm / 2.0
+                
+                # 假设角点顺序为：左上、右上、右下、左下（顺时针）
+                # 这里默认了Magazine是竖直放置的，如果是水平放置，需要进行修改。
+                corners_3d_object = np.array([
+                    [-half_width, -half_height, 0],    # 左上
+                    [half_width, -half_height, 0],   # 右上
+                    [half_width, half_height, 0],  # 右下
+                    [-half_width, half_height, 0]    # 左下
+                ], dtype=np.float32)
+                
+                print(f"立方体上立面尺寸: {width_mm}m x {height_mm}m")
+                print(f"物体坐标系角点:")
+                for i, corner in enumerate(corners_3d_object):
+                    print(f"  角点 {i+1}: ({corner[0]:.3f}, {corner[1]:.3f}, {corner[2]:.3f}) m")
+                
+                # 使用SVD方法求解刚体变换
+                print(f"\n使用SVD方法求解刚体变换...")
+                R, t = solve_rigid_transform_svd(corners_3d_camera, corners_3d_object)
+                
+                if R is not None and t is not None:
+                    print(f"SVD求解成功!")
+                    print(f"旋转矩阵R:")
+                    print(f"{R}")
+                    print(f"平移向量t: [{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}] m")
+                    
+                    # 计算上立面中心点在相机坐标系中的坐标
+                    center_camera = calculate_center_in_camera_coordinates(R, t)
+                    print(f"上立面中心点在相机坐标系中的坐标: [{center_camera[0]:.3f}, {center_camera[1]:.3f}, {center_camera[2]:.3f}] m")
+                    
+                    # 计算相机中心在上立面中心点坐标系中的坐标
+                    camera_center_object = calculate_camera_center_in_object_coordinates(R, t)
+                    print(f"相机中心在上立面中心点坐标系中的坐标: [{camera_center_object[0]:.3f}, {camera_center_object[1]:.3f}, {camera_center_object[2]:.3f}] m")
 
-
+                    # 计算变换误差
+                    mean_error, max_error, errors = calculate_transform_error(corners_3d_camera, corners_3d_object, R, t)
+                    print(f"变换误差:")
+                    print(f"  平均误差: {mean_error:.3f} m")
+                    print(f"  最大误差: {max_error:.3f} m")
+                    for i, error in enumerate(errors):
+                        print(f"  角点 {i+1} 误差: {error:.3f} m")
+                    
+                    # 保存3D变换结果
+                    transform_result_file = args.output + base_name + "_3d_transform.txt"
+                    with open(transform_result_file, 'w') as f:
+                        f.write("3D Transform Results:\n")
+                        f.write(f"Rotation Matrix R:\n")
+                        for i in range(3):
+                            f.write(f"  [{R[i,0]:.6f}, {R[i,1]:.6f}, {R[i,2]:.6f}]\n")
+                        f.write(f"Translation Vector t: [{t[0]:.6f}, {t[1]:.6f}, {t[2]:.6f}] m\n")
+                        f.write(f"Center Point in Camera Coordinates: [{center_camera[0]:.6f}, {center_camera[1]:.6f}, {center_camera[2]:.6f}] m\n")
+                        f.write(f"Camera Center in Object Coordinates: [{camera_center_object[0]:.6f}, {camera_center_object[1]:.6f}, {camera_center_object[2]:.6f}] m\n")
+                        f.write(f"Mean Error: {mean_error:.6f} m\n")
+                        f.write(f"Max Error: {max_error:.6f} m\n")
+                    print(f"3D变换结果已保存到: {transform_result_file}")
+                    
+                    # 可视化深度估计结果
+                    depth_estimation_vis_path = args.output + base_name + "_depth_estimation_result.jpg"
+                    depth_estimation_vis = visualize_depth_estimation(rgb_img, selected_corners, depth_img, depth_validity, depth_estimation_vis_path)
+                    print(f"深度估计结果可视化已保存到: {depth_estimation_vis_path}")
+                    
+                    # 可视化深度筛选过程
+                    depth_filtering_vis_path = args.output + base_name + "_depth_filtering_process.jpg"
+                    depth_filtering_vis = visualize_depth_filtering(rgb_img, selected_corners, depth_img, center_depth_mean, center_depth_std, depth_filtering_vis_path)
+                    print(f"深度筛选过程可视化已保存到: {depth_filtering_vis_path}")
+                    
+                    # 可视化3D变换结果
+                    transform_vis_path = args.output + base_name + "_3d_transform_result.jpg"
+                    transform_vis = visualize_3d_transform(rgb_img, selected_corners, corners_3d_camera, corners_3d_object, R, t, transform_vis_path, depth_validity)
+                    print(f"3D变换结果可视化已保存到: {transform_vis_path}")
+                    
+                else:
+                    print(f"SVD求解失败")
+            else:
+                print(f"无法获取角点深度信息")
+        else:
+            print(f"相机内参未加载，跳过3D变换求解")
     
     # 可视化结果
     print("\n=== 保存结果 ===")
@@ -1855,12 +1997,20 @@ def main(args):
         final_large_path
     ]
     
-    # 添加box_prompt相关文件
-    if args.box_prompt is not None and args.box_prompt != "[[0,0,0,0]]":
+    # 添加角点结果和3D变换相关文件
+    if selected_corners is not None:
         result_file = args.output + base_name + "_final_corners.txt"
-        box_prompt_vis_path = args.output + base_name + "_box_prompt_result.jpg"
+        with open(result_file, 'w') as f:
+            f.write("Final corners:\n")
+            for i, corner in enumerate(selected_corners):
+                f.write(f"Corner {i+1}: ({corner[0]}, {corner[1]})\n")
         generated_files.append(result_file)
-        generated_files.append(box_prompt_vis_path)
+        
+        # 如果有box_prompt，保存box_prompt可视化
+        if args.box_prompt is not None:
+            box_prompt_vis_path = args.output + base_name + "_box_prompt_result.jpg"
+            box_prompt_vis = visualize_box_prompt_result(rgb_img, args.box_prompt, selected_corners, box_prompt_vis_path)
+            generated_files.append(box_prompt_vis_path)
         
         # 添加3D变换相关文件
         if K is not None and dist_coeffs is not None:

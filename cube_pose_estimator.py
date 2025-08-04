@@ -98,7 +98,11 @@ class CubePoseEstimator:
             if valid_depths:
                 # 第二步：根据中心点深度筛选异常值
                 if center_depth_mean is not None and center_depth_std is not None:
-                    tolerance = 8 * center_depth_std  # 使用8倍标准差作为筛选标准
+                    # 根据center_depth_std动态设置tolerance
+                    if center_depth_std >= 0.02:
+                        tolerance = 12 * center_depth_std
+                    else:
+                        tolerance = 30 * center_depth_std
                     for depth in valid_depths:
                         if abs(depth - center_depth_mean) <= tolerance:
                             filtered_depths.append(depth)
@@ -113,7 +117,8 @@ class CubePoseEstimator:
                         print(f"    筛选后估计深度: {estimated_depth:.3f}")
                     else:
                         # 如果筛选后没有深度值，使用中心点深度
-                        print(f"    筛选后无有效深度值，使用中心点深度: {center_depth_mean:.3f}")
+                        print(f"   收集到的深度范围: {min(valid_depths):.3f} ~ {max(valid_depths):.3f}")            
+                        print(f" ×××××筛选后无有效深度值，使用中心点深度: {center_depth_mean:.3f}")
                         estimated_depth = center_depth_mean
                 else:
                     # 如果没有中心点参考，使用原始方法
@@ -144,7 +149,11 @@ class CubePoseEstimator:
                 if is_valid_depth(depth):
                     # 深度有效，检查是否与中心点深度相近
                     if center_depth_mean is not None:
-                        tolerance = 8 * center_depth_std  # 使用更严格的标准
+                        # 根据center_depth_std动态设置tolerance
+                        if center_depth_std >= 0.02:
+                            tolerance = 15 * center_depth_std
+                        else:
+                            tolerance = 30 * center_depth_std
                         if abs(depth - center_depth_mean) > tolerance:
                             print(f"  角点 {i+1}: 直接深度 {depth:.3f} 与中心点深度差异较大 (差异: {abs(depth - center_depth_mean):.3f})，尝试重新估计...")
                             estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std)
@@ -204,7 +213,11 @@ class CubePoseEstimator:
             print(f"  中心点深度标准差: {center_depth_std:.3f}")
             
             # 检查每个角点深度与中心点深度的差异
-            tolerance = 8 * center_depth_std
+            # 根据center_depth_std动态设置tolerance
+            if center_depth_std >= 0.02:
+                tolerance = 15 * center_depth_std
+            else:
+                tolerance = 30 * center_depth_std
             consistent_count = 0
             for i, depth in enumerate(all_depths):
                 diff = abs(depth - center_depth_mean)
@@ -348,15 +361,21 @@ class CubePoseEstimator:
             if len(hull_points) == 4:
                 return hull_points
             elif len(hull_points) > 4:
-                # 遍历所有点，选择最接近平行四边形的4个点
-                best_points = self._select_best_parallelogram_points(hull_points)
-                # 计算拟合质量
-                bbox_array = np.array(best_points)
+                # 计算掩码面积
                 mask_area = np.sum(mask_np)
-                bbox_area = cv2.contourArea(bbox_array)
-                fit_quality = mask_area / bbox_area if bbox_area > 0 else 0
-                if abs(fit_quality - 1) < 0.5:
-                    return best_points
+                
+                # 遍历所有点，选择最接近平行四边形的4个点
+                best_points = self._select_best_parallelogram_points(hull_points, mask_area)
+                
+                if best_points is not None:
+                    # 计算拟合质量
+                    bbox_array = np.array(best_points)
+                    bbox_area = cv2.contourArea(bbox_array)
+                    fit_quality = mask_area / bbox_area if bbox_area > 0 else 0
+                    if abs(fit_quality - 1) < 0.5:
+                        return best_points
+                    else:
+                        return None
                 else:
                     return None
         except:
@@ -364,7 +383,7 @@ class CubePoseEstimator:
         
         return None
     
-    def _select_best_parallelogram_points(self, points):
+    def _select_best_parallelogram_points(self, points, bbox_area=None):
         """从多个点中选择最接近平行四边形的4个点"""
         if len(points) <= 4:
             return points[:4]
@@ -377,14 +396,14 @@ class CubePoseEstimator:
             combo = np.array(combo)
             
             # 计算平行四边形特征评分
-            score = self._calculate_parallelogram_score(combo)
+            score = self._calculate_parallelogram_score(combo, bbox_area)
             if score < best_score:
                 best_score = score
                 best_points = combo
         
         return best_points if best_points is not None else points[:4]
     
-    def _calculate_parallelogram_score(self, points):
+    def _calculate_parallelogram_score(self, points, bbox_area=None):
         """计算4个点构成平行四边形的质量评分（分数越低越好）"""
         if len(points) != 4:
             return float('inf')
@@ -422,12 +441,23 @@ class CubePoseEstimator:
         else:
             compactness_score = 1.0
         
+        # 5. 重叠性指标（与原始掩码的重叠程度）
+        overlap_score = 0
+        if bbox_area is not None and bbox_area > 0:
+            # 计算重叠比例，理想情况下应该接近1
+            overlap_ratio = area / bbox_area
+            # 如果重叠比例偏离1太多，增加惩罚
+            overlap_score = abs(overlap_ratio - 1.0)
+        else:
+            overlap_score = 0.5  # 默认惩罚值
+        
         # 综合评分（权重可调整）
         total_score = (
             angle_consistency_score * 2.0 +      # 对角度数一致性最重要
             edge_consistency_score * 1.5 +       # 对边长度一致性次之
             angle_reasonableness * 0.5 +         # 角度合理性
-            compactness_score * 1.0              # 紧凑度
+            compactness_score * 1.0 +            # 紧凑度
+            overlap_score * 100.0                  # 重叠性指标
         )
         
         return total_score
@@ -506,6 +536,80 @@ class CubePoseEstimator:
                 
                 # 检查深度变化
                 if depth_std > 0.15:
+                    continue
+                
+                # 检查四个角点深度信息与中心点深度信息的差异
+                # 使用四个角点计算出的中心点
+                center_x = np.mean([point[0] for point in bbox_points])
+                center_y = np.mean([point[1] for point in bbox_points])
+                center_x, center_y = int(center_x), int(center_y)
+                
+                # 获取中心点周围一定范围内的有效深度值均值
+                search_radius = 5  # 搜索半径
+                center_depths = []
+                
+                for dy in range(-search_radius, search_radius + 1):
+                    for dx in range(-search_radius, search_radius + 1):
+                        nx, ny = center_x + dx, center_y + dy
+                        if (0 <= nx < depth_img.shape[1] and 0 <= ny < depth_img.shape[0]):
+                            neighbor_depth = depth_img[ny, nx]
+                            if neighbor_depth > 0 and not np.isnan(neighbor_depth) and not np.isinf(neighbor_depth):
+                                center_depths.append(neighbor_depth)
+                
+                if len(center_depths) == 0:
+                    print("  中心点周围无法获取有效深度值")
+                    continue
+                
+                center_depth = np.mean(center_depths)
+                center_depth_std = np.std(center_depths)
+                print(f"  中心点深度均值: {center_depth:.3f}, 标准差: {center_depth_std:.3f} (基于{len(center_depths)}个有效像素)")
+                
+                # corner_depth_tolerance = 0.1  # 角点深度与中心点深度的允许差异阈值
+                if center_depth_std >= 0.02:
+                    corner_depth_tolerance = 15 * center_depth_std
+                else:
+                    corner_depth_tolerance = 30 * center_depth_std
+                
+                # 获取四个角点周围一定范围内的深度值并检查差异
+                corner_search_radius = 5  # 角点搜索半径
+                corner_depth_valid = True
+                
+                for i, point in enumerate(bbox_points):
+                    x, y = int(point[0]), int(point[1])
+                    corner_depths = []
+                    
+                    # 获取角点周围一定范围内的有效深度值
+                    for dy in range(-corner_search_radius, corner_search_radius + 1):
+                        for dx in range(-corner_search_radius, corner_search_radius + 1):
+                            nx, ny = x + dx, y + dy
+                            if (0 <= nx < depth_img.shape[1] and 0 <= ny < depth_img.shape[0]):
+                                neighbor_depth = depth_img[ny, nx]
+                                if neighbor_depth > 0 and not np.isnan(neighbor_depth) and not np.isinf(neighbor_depth):
+                                    corner_depths.append(neighbor_depth)
+                    
+                    if len(corner_depths) == 0:
+                        print(f"  角点 {i+1} 周围无法获取有效深度值")
+                        corner_depth_valid = False
+                        break
+                    
+                    # 根据中心点深度筛选异常值
+                    filtered_corner_depths = []
+                    for depth in corner_depths:
+                        depth_diff = abs(depth - center_depth)
+                        if depth_diff <= corner_depth_tolerance:
+                            filtered_corner_depths.append(depth)
+                    
+                    # 如果筛选后没有有效深度值，说明角点附近所有值都与中心点差异很大
+                    if len(filtered_corner_depths) == 0:
+                        print(f"  角点 {i+1} 附近所有深度值都与中心点差异过大 (收集到{len(corner_depths)}个深度值)")
+                        corner_depth_valid = False
+                        break
+                    
+                    # 计算筛选后的深度均值
+                    corner_depth_mean = np.mean(filtered_corner_depths)
+                    print(f"  角点 {i+1} 深度均值: {corner_depth_mean:.3f} (筛选后{len(filtered_corner_depths)}个有效值)")
+                
+                if not corner_depth_valid:
                     continue
                 
                 # 计算凸包
@@ -635,28 +739,75 @@ class CubePoseEstimator:
         filtered_annotations = self._filter_cube_segments(ann, depth_img)
         
         if filtered_annotations is None or len(filtered_annotations) == 0:
+            print(f"错误: 没有筛选带到任何有效的疑似上立面")
             return None, None
         
-        # 在box_prompt范围内查找符合条件的角点
-        selected_corners = None
-        for annotation in filtered_annotations:
-            # 检查annotation的格式
-            if isinstance(annotation, dict):
-                mask = annotation['segmentation']
+        # 处理角点选择逻辑
+        valid_corners = []
+        
+        if box_prompt is not None:
+            # 在box_prompt范围内查找符合条件的角点
+            for annotation in filtered_annotations:
+                # 检查annotation的格式
+                if isinstance(annotation, dict):
+                    mask = annotation['segmentation']
+                else:
+                    # 如果annotation不是字典，直接使用它作为mask
+                    mask = annotation
+                
+                corners_2d = self._find_cube_corners(mask, depth_img)
+
+                
+                if corners_2d is not None:
+                    # 检查角点是否在box_prompt范围内
+                    if self._check_corners_in_box_prompt(corners_2d, box_prompt):
+                        valid_corners.append(corners_2d)
+            
+            # 检查是否找到多个符合条件的角点集合
+            if len(valid_corners) > 1:
+                print(f"错误: 检测到多个边框，找到 {len(valid_corners)} 个符合条件的角点集合")
+                return None, None
+            elif len(valid_corners) == 1:
+                selected_corners = valid_corners[0]
             else:
-                # 如果annotation不是字典，直接使用它作为mask
-                mask = annotation
+                print(f"\n错误: 无法在box_prompt范围内找到有效的角点集合")
+                print(f"请检查以下可能的问题:")
+                print(f"1. box_prompt参数是否正确: {box_prompt}")
+                print(f"2. 图像中是否存在目标物体")
+                print(f"3. 分割算法是否正确检测到目标")
+                print(f"4. 角点检测算法是否正常工作")
+                return None, None
+        else:
+            # 没有提供box_prompt，检查是否只有一组角点
+            for annotation in filtered_annotations:
+                # 检查annotation的格式
+                if isinstance(annotation, dict):
+                    mask = annotation['segmentation']
+                else:
+                    # 如果annotation不是字典，直接使用它作为mask
+                    mask = annotation
+                
+                corners_2d = self._find_cube_corners(mask, depth_img)
+                
+                if corners_2d is not None:
+                    valid_corners.append(corners_2d)
             
-            corners_2d = self._find_cube_corners(mask, depth_img)
-            
-            if corners_2d is not None:
-                # 检查角点是否在box_prompt范围内
-                if self._check_corners_in_box_prompt(corners_2d, box_prompt):
-                    selected_corners = corners_2d
-                    break
-        
-        if selected_corners is None:
-            return None, None
+            # 检查是否找到多个角点集合
+            if len(valid_corners) == 0:
+                print(f"\n错误: 没有检测到任何有效的角点集合")
+                print(f"请检查以下可能的问题:")
+                print(f"1. 图像中是否存在目标物体")
+                print(f"2. 分割算法是否正确检测到目标")
+                print(f"3. 角点检测算法是否正常工作")
+                return None, None
+            elif len(valid_corners) > 1:
+                print(f"\n错误: 检测到多个边框，找到 {len(valid_corners)} 个角点集合")
+                print(f"请使用box_prompt参数缩小检测的边框范围，或者确保图像中只有一个目标物体")
+                return None, None
+            else:
+                # 只有一组角点，使用它
+                selected_corners = valid_corners[0]
+                print(f"=== 未使用box_prompt,自动选择角点: {selected_corners}")
         
         # 获取3D相机坐标
         result = self._get_corner_depths(selected_corners, depth_img)
@@ -700,8 +851,8 @@ if __name__ == "__main__":
     # 加载图像
     # rgb_img = cv2.imread("./robot_img/rgb/rgb_0000.jpg")
     # depth_img = cv2.imread("./robot_img/depth/depth_0000.png", cv2.IMREAD_ANYDEPTH)
-    rgb_img = cv2.imread("./robot_img2/1/rgb/rgb_0000.jpg")
-    depth_img = cv2.imread("./robot_img2/1/depth/depth_0000.png", cv2.IMREAD_ANYDEPTH)
+    rgb_img = cv2.imread("./robot_img2/4/rgb/rgb_0000.jpg")
+    depth_img = cv2.imread("./robot_img2/4/depth/depth_0000.png", cv2.IMREAD_UNCHANGED)
     depth_img = depth_img.astype(np.float32) / 1000.0
     
     # 估计姿态
