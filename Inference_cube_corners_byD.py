@@ -38,6 +38,7 @@ def load_camera_intrinsics(intrinsic_path):
 def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
     """根据2D角点和深度图获取3D相机坐标，以中心点深度为参考进行估计"""
     if len(corners_2d) != 4:
+        print(f"错误: 需要4个角点")
         return None
     
     corners_3d_camera = []
@@ -75,7 +76,7 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
             print(f"  警告: 中心点周围无法获取有效深度")
             return None, None, []
     
-    def estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, search_radius=5):
+    def estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, tolerance, search_radius=5):
         """从周围像素估计深度值，以中心点深度为参考，先筛选异常值"""
         valid_depths = []
         filtered_depths = []
@@ -93,10 +94,10 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
             # 第二步：根据中心点深度筛选异常值
             if center_depth_mean is not None and center_depth_std is not None:
                 # 根据center_depth_std动态设置tolerance
-                if center_depth_std >= 0.02:
-                    tolerance = 15 * center_depth_std
-                else:
-                    tolerance = 30 * center_depth_std
+                # if center_depth_std >= 0.002:
+                #     tolerance = 15 * center_depth_std
+                # else:
+                #     tolerance = 30 * center_depth_std
                 for depth in valid_depths:
                     if abs(depth - center_depth_mean) <= tolerance:
                         filtered_depths.append(depth)
@@ -132,6 +133,16 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
     
     # 首先获取中心点深度作为参考
     center_depth_mean, center_depth_std, center_depths = get_center_depth(corners_2d, depth_img)
+    if center_depth_std is None:
+        print(f"错误: 无法获取中心点深度")
+        return None, None, None, None
+    
+    if center_depth_std >= 0.002:
+        tolerance = 15 * center_depth_std
+    else:
+        tolerance = 30 * center_depth_std
+    tolerance = min(tolerance, 0.05)
+    print(f"  角点深度与中心点深度的允许差异阈值: {tolerance:.3f} *****")
     
     for i, (x, y) in enumerate(corners_2d):
         # 确保坐标在图像范围内
@@ -143,10 +154,10 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
             if is_valid_depth(depth):
                 # 深度有效，检查是否与中心点深度相近
                 if center_depth_mean is not None:
-                    tolerance = 12 * center_depth_std  # 使用更严格的标准 (其他地方是15)
-                    if abs(depth - center_depth_mean) > tolerance:
+                    tolerance_center = 12 * center_depth_std  # 使用更严格的标准 (其他地方是15)
+                    if abs(depth - center_depth_mean) > tolerance_center:
                         print(f"  角点 {i+1}: 直接深度 {depth:.3f} 与中心点深度差异较大 (差异: {abs(depth - center_depth_mean):.3f})，尝试重新估计...")
-                        estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std)
+                        estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, tolerance)
                         if estimated_depth is not None:
                             depth = estimated_depth
                             depth_validity.append(False)  # 标记为估计值
@@ -163,7 +174,7 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
             else:
                 # 深度无效，从周围像素估计
                 print(f"  角点 {i+1}: 直接深度无效 ({depth:.3f})，尝试从周围像素估计...")
-                estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std)
+                estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, tolerance)
                 
                 if estimated_depth is not None:
                     depth = estimated_depth
@@ -171,7 +182,7 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
                     print(f"  角点 {i+1}: 从 {neighbor_count} 个邻居像素估计深度 {depth:.3f}")
                 else:
                     print(f"  角点 {i+1}: 无法估计深度，跳过")
-                    return None
+                    return None, None, None, None
             
             # 将像素坐标转换为归一化坐标
             pixel_coord = np.array([[x, y]], dtype=np.float32)
@@ -204,10 +215,10 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
         
         # 检查每个角点深度与中心点深度的差异
         # 根据center_depth_std动态设置tolerance
-        if center_depth_std >= 0.02:
-            tolerance = 15 * center_depth_std
-        else:
-            tolerance = 30 * center_depth_std
+        # if center_depth_std >= 0.002:
+        #     tolerance = 15 * center_depth_std
+        # else:
+        #     tolerance = 30 * center_depth_std
         consistent_count = 0
         for i, depth in enumerate(all_depths):
             diff = abs(depth - center_depth_mean)
@@ -222,10 +233,10 @@ def get_corner_depths(corners_2d, depth_img, K, dist_coeffs):
         # 检查角点间深度的一致性
         max_depth_diff = max(all_depths) - min(all_depths)
         print(f"  角点间最大深度差异: {max_depth_diff:.3f}")
-        if max_depth_diff > 2 * center_depth_std:
-            print(f"  警告: 角点间深度差异较大，可能影响3D变换精度")
+        if max_depth_diff > 20 * center_depth_std:
+            print(f"  警告: 角点间深度差异较大，超过20倍中心点深度标准差({20 * center_depth_std:.3f})，可能影响3D变换精度")
         else:
-            print(f"  角点间深度差异在合理范围内")
+            print(f"  角点间深度差异在合理范围内，20倍中心点深度标准差为{20 * center_depth_std:.3f}")
     
     return np.array(corners_3d_camera, dtype=np.float32), depth_validity, center_depth_mean, center_depth_std
 
@@ -480,7 +491,7 @@ def visualize_depth_filtering(rgb_img, corners_2d, depth_img, center_depth_mean,
     
     # 绘制筛选区域
     # 根据center_depth_std动态设置tolerance
-    if center_depth_std >= 0.02:
+    if center_depth_std >= 0.002:
         tolerance = 15 * center_depth_std
     else:
         tolerance = 30 * center_depth_std
@@ -871,7 +882,7 @@ def calculate_angles_and_edges(points):
     return angles, edges
 
 
-def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
+def filter_cube_segments(annotations, depth_img, min_area=3000, max_area=50000):
     """基于几何特征和深度信息筛选立方体上立面分割（平行四边形特征）"""
     filtered_annotations = []
     
@@ -884,6 +895,7 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
         # 计算面积
         area = np.sum(mask_np)
         if area < min_area or area > max_area:
+            print(f"××× 分割 {i+1} 面积 {area:.3f} 不在 {min_area:.3f} 和 {max_area:.3f} 之间")
             continue
         
         # 计算边界框
@@ -899,6 +911,7 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
             # 使用优化的平行四边形拟合，找到最符合平行四边形的四个点。采用多种方法确保准确性
             bbox_points = optimize_parallelogram_fit(points, mask_np)
             if bbox_points is None:
+                print(f"××× 分割 {i+1} 无法找到平行四边形")
                 continue
             
             # 按顺时针顺序排列角点
@@ -931,16 +944,19 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
                     break
             
             if not angle_consistency:
+                print(f"××× 分割 {i+1} 对角角度不一致，角度差值 {abs(pair[0] - pair[1])} 大于 15 度")
                 continue
             
             # 计算角度偏差（理想情况下应该在60-120度范围，适应透视）
             angle_deviation = np.mean([abs(angle - 90) for angle in angles_deg])
             if angle_deviation > 45:  # 允许45度的角度偏差，适应透视变形
+                print(f"××× 分割 {i+1} 角度偏差 {angle_deviation} 大于 45 度")
                 continue
             
             # 计算深度统计信息
             depth_values = depth_img[safe_mask_to_bool(mask)]
             if len(depth_values) == 0:
+                print(f"××× 分割 {i+1} 所有点 深度值为0")
                 continue
                 
             depth_mean = np.mean(depth_values)
@@ -948,6 +964,7 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
             
             # 检查深度变化（立方体上立面应该有较小的深度变化，但允许透视变形）
             if depth_std > 0.15:  # 允许更大的深度变化，适应透视效果
+                print(f"××× 分割 {i+1} 深度标准差 {depth_std} 大于 0.15")
                 continue
             
             # 检查四个角点深度信息与中心点深度信息的差异
@@ -969,25 +986,33 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
                             center_depths.append(neighbor_depth)
             
             if len(center_depths) == 0:
-                print("  中心点周围无法获取有效深度值")
+                print(f"××× 分割 {i+1} 中心点周围无法获取有效深度值")
                 continue
             
             center_depth = np.mean(center_depths)
             center_depth_std = np.std(center_depths)
-            print(f"  中心点深度均值: {center_depth:.3f}, 标准差: {center_depth_std:.3f} (基于{len(center_depths)}个有效像素)")
             
-            # corner_depth_tolerance = 0.08  # 角点深度与中心点深度的允许差异阈值
-            if center_depth_std >= 0.02:
-                corner_depth_tolerance = 15 * center_depth_std
-            else:
-                corner_depth_tolerance = 30 * center_depth_std
+            corner_depth_tolerance = 0.05  # 角点深度与中心点深度的允许差异阈值
+            # (0.005,0.01] * 10, (0.002,0.005] * 15, (0.001,0.002] * 20, (0,0.001] * 30
+            # if center_depth_std >= 0.01:
+            #     corner_depth_tolerance = 0.06
+            # elif center_depth_std >= 0.005:
+            #     corner_depth_tolerance = 8 * center_depth_std
+            # elif center_depth_std >= 0.002:
+            #     corner_depth_tolerance = 15 * center_depth_std
+            # elif center_depth_std >= 0.001:
+            #     corner_depth_tolerance = 20 * center_depth_std
+            # else:
+            #     corner_depth_tolerance = 30 * center_depth_std
+
+            print(f" 分割 {i+1} 中心点深度均值: {center_depth:.3f}, 标准差: {center_depth_std:.3f}, 角点深度与中心点深度的允许差异阈值: {corner_depth_tolerance:.5f} (基于{len(center_depths)}个有效像素)")
             
             # 获取四个角点周围一定范围内的深度值并检查差异
-            corner_search_radius = 5  # 角点搜索半径
-            # corner_search_radius = 20
+            # corner_search_radius = 5  # 角点搜索半径
+            corner_search_radius = 5
             corner_depth_valid = True
             
-            for i, point in enumerate(bbox_points):
+            for j, point in enumerate(bbox_points):
                 x, y = int(point[0]), int(point[1])
                 corner_depths = []
                 
@@ -1001,7 +1026,7 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
                                 corner_depths.append(neighbor_depth)
                 
                 if len(corner_depths) == 0:
-                    print(f"  角点 {i+1} 周围无法获取有效深度值")
+                    print(f"××× 分割 {i+1} 角点 {j+1} 周围无法获取有效深度值")
                     corner_depth_valid = False
                     break
                 
@@ -1012,30 +1037,27 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
                     if depth_diff <= corner_depth_tolerance:
                         filtered_corner_depths.append(depth)
                 
-                # 如果筛选后没有有效深度值，说明角点附近所有值都与中心点差异很大
+                # 如果筛选后没有 有效深度值，说明角点附近所有值都与中心点差异很大
                 if len(filtered_corner_depths) == 0:
-                    print(f"  角点 {i+1} 附近所有深度值都与中心点差异过大 (收集到{len(corner_depths)}个深度值)")
+                    print(f"××× 分割 {i+1} 角点 {j+1} 附近所有深度值都与中心点差异过大 (收集到{len(corner_depths)}个深度值)")
                     corner_depth_valid = False
                     break
                 
                 # 计算筛选后的深度均值
                 corner_depth_mean = np.mean(filtered_corner_depths)
-                print(f"  角点 {i+1} 深度均值: {corner_depth_mean:.3f} (筛选后{len(filtered_corner_depths)}个有效值)")
+                print(f" 分割 {i+1} 角点 {j+1} 深度均值: {corner_depth_mean:.3f} (筛选后{len(filtered_corner_depths)}个有效值)")
             
             if not corner_depth_valid:
                 continue
-            
-            # 计算凸包
-            points = np.column_stack((x_coords, y_coords))
-            if len(points) < 4:
-                continue
+
                 
             hull = ConvexHull(points)
             hull_area = hull.volume  # 对于2D，volume实际上是面积
             solidity = area / hull_area
             
             # 立方体上立面应该有较高的实心度（接近平行四边形）
-            if solidity < 0.6:  # 降低要求，适应透视变形
+            if solidity < 0.94:  # 降低要求，适应透视变形
+                print(f"××× 分割 {i+1} 实心度 {solidity} 小于 0.95")
                 continue
             
             # 检查平行四边形的对边长度一致性
@@ -1049,6 +1071,7 @@ def filter_cube_segments(annotations, depth_img, min_area=1000, max_area=50000):
                         break
             
             if not edge_consistency:
+                print(f" ××× 分割 {i+1} 对边长度不一致，对边长度差值 {abs(pair[0] - pair[1])} 大于 25%")
                 continue
                 
         except:
@@ -1641,6 +1664,65 @@ def simple_segmentation_visualization(rgb_img, annotations, output_dir, base_nam
     return output_path
 
 
+def calculate_center_depth_and_position(corners_2d, depth_img, K, dist_coeffs):
+    """根据角点和深度图以及相机内参计算中心点深度和位置"""
+    if len(corners_2d) != 4:
+        return None, None
+    
+    # 计算中心点像素坐标
+    center_x = np.mean([corner[0] for corner in corners_2d])
+    center_y = np.mean([corner[1] for corner in corners_2d])
+    center_x, center_y = int(center_x), int(center_y)
+    
+    print(f"中心点像素坐标: ({center_x}, {center_y})")
+    
+    # 获取中心点深度
+    center_depth = None
+    if 0 <= center_y < depth_img.shape[0] and 0 <= center_x < depth_img.shape[1]:
+        center_depth = depth_img[center_y, center_x]
+        print(f"中心点深度: {center_depth:.3f}")
+    
+    # 如果中心点深度无效，使用附近有效深度值的平均
+    if center_depth is None or center_depth <= 0 or np.isnan(center_depth) or np.isinf(center_depth):
+        print("中心点深度无效，使用附近有效深度值的平均")
+        search_radius = 10
+        valid_depths = []
+        
+        for dy in range(-search_radius, search_radius + 1):
+            for dx in range(-search_radius, search_radius + 1):
+                y = center_y + dy
+                x = center_x + dx
+                if (0 <= y < depth_img.shape[0] and 0 <= x < depth_img.shape[1]):
+                    depth = depth_img[y, x]
+                    if depth > 0 and not np.isnan(depth) and not np.isinf(depth):
+                        valid_depths.append(depth)
+        
+        if valid_depths:
+            center_depth = np.mean(valid_depths)
+            print(f"使用附近{len(valid_depths)}个有效深度值的平均: {center_depth:.3f}")
+        else:
+            print("未找到有效深度值")
+            return None, None
+    
+    # 计算中心点在相机坐标系中的3D位置
+    # 将像素坐标转换为归一化平面坐标
+    center_pixel = np.array([[center_x, center_y]], dtype=np.float32)
+    center_pixel_normalized = cv2.undistortPoints(
+        center_pixel, K, dist_coeffs
+    ).reshape(2)
+    
+    # 计算相机坐标系下的3D点
+    center_3d_camera = np.array([
+        center_pixel_normalized[0] * center_depth,
+        center_pixel_normalized[1] * center_depth,
+        center_depth
+    ])
+    
+    print(f"中心点在相机坐标系中的3D位置: [{center_3d_camera[0]:.3f}, {center_3d_camera[1]:.3f}, {center_3d_camera[2]:.3f}] m")
+    
+    return center_depth, center_3d_camera
+
+
 def main(args):
     # 导入必要的模块
     from fastsam import FastSAM, FastSAMPrompt
@@ -1855,9 +1937,19 @@ def main(args):
         box_prompt_vis = visualize_box_prompt_result(rgb_img, args.box_prompt, selected_corners, box_prompt_vis_path)
         print(f"box_prompt结果可视化已保存到: {box_prompt_vis_path}")
         
+               
+        # 根据角点和深度图以及相机内参计算中心点深度和位置
+        if K is not None and dist_coeffs is not None:
+            print(f"\n=== 使用深度值+内参 计算中心点深度和位置 ===")
+            center_depth, center_3d_camera = calculate_center_depth_and_position(selected_corners, depth_img, K, dist_coeffs)
+            if center_depth is not None and center_3d_camera is not None:
+                print(f"\n=== 使用深度值+内参 计算中心点位置成功，上立面中心点在相机坐标系中的坐标: [{center_3d_camera[0]:.3f}, {center_3d_camera[1]:.3f}, {center_3d_camera[2]:.3f}] m ===")
+            else:
+                print(f"中心点深度和位置计算失败")
+        
         # 3D变换求解
         if K is not None and dist_coeffs is not None:
-            print(f"\n=== 3D变换求解 ===")
+            print(f"\n=== 使用3D变换求解 中心点位置和姿态 ===")
             
             # 获取角点的3D相机坐标
             print(f"获取角点深度信息，并计算角点的3D相机坐标")
@@ -1869,6 +1961,8 @@ def main(args):
                 # 已知立方体上立面长宽是117mm*60mm
                 width_mm = 0.117
                 height_mm = 0.06
+                # width_mm = 0.137
+                # height_mm = 0.0715
                 half_width = width_mm / 2.0
                 half_height = height_mm / 2.0
                 
@@ -1898,7 +1992,7 @@ def main(args):
                     
                     # 计算上立面中心点在相机坐标系中的坐标
                     center_camera = calculate_center_in_camera_coordinates(R, t)
-                    print(f"上立面中心点在相机坐标系中的坐标: [{center_camera[0]:.3f}, {center_camera[1]:.3f}, {center_camera[2]:.3f}] m")
+                    print(f"\n=== 上立面中心点在相机坐标系中的坐标: [{center_camera[0]:.3f}, {center_camera[1]:.3f}, {center_camera[2]:.3f}] m ===")
                     
                     # 计算相机中心在上立面中心点坐标系中的坐标
                     camera_center_object = calculate_camera_center_in_object_coordinates(R, t)

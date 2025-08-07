@@ -44,6 +44,7 @@ class CubePoseEstimator:
     def _get_corner_depths(self, corners_2d, depth_img):
         """根据2D角点和深度图获取3D相机坐标，以中心点深度为参考进行估计"""
         if len(corners_2d) != 4:
+            print(f"错误: 需要4个角点") 
             return None
         
         corners_3d_camera = []
@@ -81,7 +82,7 @@ class CubePoseEstimator:
                 print(f"  警告: 中心点周围无法获取有效深度")
                 return None, None, []
         
-        def estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, search_radius=5):
+        def estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, tolerance, search_radius=5):
             """从周围像素估计深度值，以中心点深度为参考，先筛选异常值"""
             valid_depths = []
             filtered_depths = []
@@ -98,11 +99,7 @@ class CubePoseEstimator:
             if valid_depths:
                 # 第二步：根据中心点深度筛选异常值
                 if center_depth_mean is not None and center_depth_std is not None:
-                    # 根据center_depth_std动态设置tolerance
-                    if center_depth_std >= 0.02:
-                        tolerance = 12 * center_depth_std
-                    else:
-                        tolerance = 30 * center_depth_std
+                    # 使用传入的tolerance参数
                     for depth in valid_depths:
                         if abs(depth - center_depth_mean) <= tolerance:
                             filtered_depths.append(depth)
@@ -138,6 +135,18 @@ class CubePoseEstimator:
         
         # 首先获取中心点深度作为参考
         center_depth_mean, center_depth_std, center_depths = get_center_depth(corners_2d, depth_img)
+        if center_depth_std is None:
+            print(f"错误: 无法获取中心点深度")
+            return None, None, None, None
+            
+        if center_depth_std >= 0.002:
+            tolerance = 15 * center_depth_std
+        else:
+            tolerance = 30 * center_depth_std
+        tolerance = min(tolerance, 0.05)
+        print(f"  角点深度与中心点深度的允许差异阈值: {tolerance:.3f} *****")
+
+
         
         for i, (x, y) in enumerate(corners_2d):
             # 确保坐标在图像范围内
@@ -150,13 +159,10 @@ class CubePoseEstimator:
                     # 深度有效，检查是否与中心点深度相近
                     if center_depth_mean is not None:
                         # 根据center_depth_std动态设置tolerance
-                        if center_depth_std >= 0.02:
-                            tolerance = 15 * center_depth_std
-                        else:
-                            tolerance = 30 * center_depth_std
-                        if abs(depth - center_depth_mean) > tolerance:
+                        tolerance_center = 12 * center_depth_std  # 使用更严格的标准 (其他地方是15)
+                        if abs(depth - center_depth_mean) > tolerance_center:
                             print(f"  角点 {i+1}: 直接深度 {depth:.3f} 与中心点深度差异较大 (差异: {abs(depth - center_depth_mean):.3f})，尝试重新估计...")
-                            estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std)
+                            estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, tolerance)
                             if estimated_depth is not None:
                                 depth = estimated_depth
                                 depth_validity.append(False)  # 标记为估计值
@@ -173,7 +179,7 @@ class CubePoseEstimator:
                 else:
                     # 深度无效，从周围像素估计
                     print(f"  角点 {i+1}: 直接深度无效 ({depth:.3f})，尝试从周围像素估计...")
-                    estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std)
+                    estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, tolerance)
                     
                     if estimated_depth is not None:
                         depth = estimated_depth
@@ -181,7 +187,7 @@ class CubePoseEstimator:
                         print(f"  角点 {i+1}: 从 {neighbor_count} 个邻居像素估计深度 {depth:.3f}")
                     else:
                         print(f"  角点 {i+1}: 无法估计深度，跳过")
-                        return None
+                        return None, None, None, None
                 
                 # 将像素坐标转换为归一化坐标
                 pixel_coord = np.array([[x, y]], dtype=np.float32)
@@ -214,10 +220,10 @@ class CubePoseEstimator:
             
             # 检查每个角点深度与中心点深度的差异
             # 根据center_depth_std动态设置tolerance
-            if center_depth_std >= 0.02:
-                tolerance = 15 * center_depth_std
-            else:
-                tolerance = 30 * center_depth_std
+            # if center_depth_std >= 0.02:
+            #     tolerance = 15 * center_depth_std
+            # else:
+            #     tolerance = 30 * center_depth_std
             consistent_count = 0
             for i, depth in enumerate(all_depths):
                 diff = abs(depth - center_depth_mean)
@@ -232,10 +238,10 @@ class CubePoseEstimator:
             # 检查角点间深度的一致性
             max_depth_diff = max(all_depths) - min(all_depths)
             print(f"  角点间最大深度差异: {max_depth_diff:.3f}")
-            if max_depth_diff > 2 * center_depth_std:
-                print(f"  警告: 角点间深度差异较大，可能影响3D变换精度")
+            if max_depth_diff > 20 * center_depth_std:
+                print(f"  警告: 角点间深度差异较大，超过20倍中心点深度标准差({20 * center_depth_std:.3f})，可能影响3D变换精度")
             else:
-                print(f"  角点间深度差异在合理范围内")
+                print(f"  角点间深度差异在合理范围内，20倍中心点深度标准差为{20 * center_depth_std:.3f}")
         
         return np.array(corners_3d_camera, dtype=np.float32), depth_validity, center_depth_mean, center_depth_std
     
@@ -457,12 +463,13 @@ class CubePoseEstimator:
             edge_consistency_score * 1.5 +       # 对边长度一致性次之
             angle_reasonableness * 0.5 +         # 角度合理性
             compactness_score * 1.0 +            # 紧凑度
-            overlap_score * 100.0                  # 重叠性指标
+            overlap_score * 1000.0                  # 重叠性指标
+            # overlap_score * 100.0                  # 重叠性指标
         )
         
         return total_score
     
-    def _filter_cube_segments(self, annotations, depth_img, min_area=1000, max_area=50000):
+    def _filter_cube_segments(self, annotations, depth_img, min_area=3000, max_area=50000):
         """基于几何特征和深度信息筛选立方体上立面分割"""
         filtered_annotations = []
         
@@ -480,6 +487,7 @@ class CubePoseEstimator:
             # 计算面积
             area = np.sum(mask_np)
             if area < min_area or area > max_area:
+                print(f"××× 分割 {i+1} 面积 {area:.3f} 不在 {min_area:.3f} 和 {max_area:.3f} 之间")
                 continue
             
             # 计算边界框
@@ -507,6 +515,7 @@ class CubePoseEstimator:
                 # 使用公共函数计算角度和边长
                 angles_deg, edges = self._calculate_angles_and_edges(bbox_points)
                 if angles_deg is None or edges is None:
+                    print(f"××× 分割 {i+1} 无法找到平行四边形")
                     continue
                 
                 # 检查平行四边形角度特征
@@ -518,17 +527,20 @@ class CubePoseEstimator:
                         break
                 
                 if not angle_consistency:
+                    print(f"××× 分割 {i+1} 对角角度不一致，角度差值 {abs(pair[0] - pair[1])} 大于 15 度")
                     continue
                 
                 # 计算角度偏差
                 angle_deviation = np.mean([abs(angle - 90) for angle in angles_deg])
                 if angle_deviation > 45:
+                    print(f"××× 分割 {i+1} 角度偏差 {angle_deviation} 大于 45 度")
                     continue
                 
                 # 计算深度统计信息
                 mask_bool = self._safe_mask_to_bool(mask)
                 depth_values = depth_img[mask_bool]
                 if len(depth_values) == 0:
+                    print(f"××× 分割 {i+1} 所有点 深度值为0")
                     continue
                     
                 depth_mean = np.mean(depth_values)
@@ -536,6 +548,7 @@ class CubePoseEstimator:
                 
                 # 检查深度变化
                 if depth_std > 0.15:
+                    print(f"××× 分割 {i+1} 深度标准差 {depth_std} 大于 0.15")
                     continue
                 
                 # 检查四个角点深度信息与中心点深度信息的差异
@@ -557,24 +570,24 @@ class CubePoseEstimator:
                                 center_depths.append(neighbor_depth)
                 
                 if len(center_depths) == 0:
-                    print("  中心点周围无法获取有效深度值")
+                    print(f"××× 分割 {i+1} 中心点周围无法获取有效深度值")
                     continue
                 
                 center_depth = np.mean(center_depths)
                 center_depth_std = np.std(center_depths)
-                print(f"  中心点深度均值: {center_depth:.3f}, 标准差: {center_depth_std:.3f} (基于{len(center_depths)}个有效像素)")
                 
-                # corner_depth_tolerance = 0.1  # 角点深度与中心点深度的允许差异阈值
-                if center_depth_std >= 0.02:
-                    corner_depth_tolerance = 15 * center_depth_std
-                else:
-                    corner_depth_tolerance = 30 * center_depth_std
+                corner_depth_tolerance = 0.05  # 角点深度与中心点深度的允许差异阈值
+                print(f" 分割 {i+1} 中心点深度均值: {center_depth:.3f}, 标准差: {center_depth_std:.3f}, 角点深度与中心点深度的允许差异阈值: {corner_depth_tolerance:.5f} (基于{len(center_depths)}个有效像素)")
+                # if center_depth_std >= 0.02:
+                #     corner_depth_tolerance = 15 * center_depth_std
+                # else:
+                #     corner_depth_tolerance = 30 * center_depth_std
                 
                 # 获取四个角点周围一定范围内的深度值并检查差异
                 corner_search_radius = 5  # 角点搜索半径
                 corner_depth_valid = True
                 
-                for i, point in enumerate(bbox_points):
+                for j, point in enumerate(bbox_points):
                     x, y = int(point[0]), int(point[1])
                     corner_depths = []
                     
@@ -588,7 +601,7 @@ class CubePoseEstimator:
                                     corner_depths.append(neighbor_depth)
                     
                     if len(corner_depths) == 0:
-                        print(f"  角点 {i+1} 周围无法获取有效深度值")
+                        print(f"××× 分割 {i+1} 角点 {j+1} 周围无法获取有效深度值")
                         corner_depth_valid = False
                         break
                     
@@ -601,13 +614,13 @@ class CubePoseEstimator:
                     
                     # 如果筛选后没有有效深度值，说明角点附近所有值都与中心点差异很大
                     if len(filtered_corner_depths) == 0:
-                        print(f"  角点 {i+1} 附近所有深度值都与中心点差异过大 (收集到{len(corner_depths)}个深度值)")
+                        print(f"××× 分割 {i+1} 角点 {j+1} 附近所有深度值都与中心点差异过大 (收集到{len(corner_depths)}个深度值)")
                         corner_depth_valid = False
                         break
                     
                     # 计算筛选后的深度均值
                     corner_depth_mean = np.mean(filtered_corner_depths)
-                    print(f"  角点 {i+1} 深度均值: {corner_depth_mean:.3f} (筛选后{len(filtered_corner_depths)}个有效值)")
+                    print(f" 分割 {i+1} 角点 {j+1} 深度均值: {corner_depth_mean:.3f} (筛选后{len(filtered_corner_depths)}个有效值)")
                 
                 if not corner_depth_valid:
                     continue
@@ -618,7 +631,8 @@ class CubePoseEstimator:
                 solidity = area / hull_area
                 
                 # 检查实心度
-                if solidity < 0.6:
+                if solidity < 0.94:
+                    print(f"××× 分割 {i+1} 实心度 {solidity} 小于 0.94")
                     continue
                 
                 # 检查平行四边形的对边长度一致性
@@ -631,6 +645,7 @@ class CubePoseEstimator:
                             break
                 
                 if not edge_consistency:
+                    print(f"××× 分割 {i+1} 对边长度不一致，对边长度差值 {abs(pair[0] - pair[1])} 大于 25%")
                     continue
                 
                 # 添加到筛选结果
@@ -762,6 +777,8 @@ class CubePoseEstimator:
                     # 检查角点是否在box_prompt范围内
                     if self._check_corners_in_box_prompt(corners_2d, box_prompt):
                         valid_corners.append(corners_2d)
+                    else:
+                        print(f"角点 {corners_2d} 不在box_prompt范围内")
             
             # 检查是否找到多个符合条件的角点集合
             if len(valid_corners) > 1:
@@ -851,12 +868,13 @@ if __name__ == "__main__":
     # 加载图像
     # rgb_img = cv2.imread("./robot_img/rgb/rgb_0000.jpg")
     # depth_img = cv2.imread("./robot_img/depth/depth_0000.png", cv2.IMREAD_ANYDEPTH)
-    rgb_img = cv2.imread("./robot_img2/4/rgb/rgb_0000.jpg")
-    depth_img = cv2.imread("./robot_img2/4/depth/depth_0000.png", cv2.IMREAD_UNCHANGED)
+    rgb_img = cv2.imread("./code_imgs/10/rgb/rgb_0000.jpg")
+    depth_img = cv2.imread("./code_imgs/10/depth/depth_0000.png", cv2.IMREAD_UNCHANGED)
     depth_img = depth_img.astype(np.float32) / 1000.0
     
     # 估计姿态
-    center_pos, euler_angles = estimator.estimate_pose(rgb_img, depth_img, box_prompt=[500, 200, 1100, 700])
+    # center_pos, euler_angles = estimator.estimate_pose(rgb_img, depth_img, box_prompt=[500, 200, 1100, 700])
+    center_pos, euler_angles = estimator.estimate_pose(rgb_img, depth_img)
     if center_pos is not None:
         print(f"中心位置: {center_pos}")
         print(f"欧拉角: {euler_angles}")
