@@ -7,6 +7,8 @@
 import numpy as np
 import cv2
 import json
+import ast
+import os
 from fastsam import FastSAM, FastSAMPrompt
 from scipy.spatial import ConvexHull
 from itertools import combinations
@@ -39,7 +41,121 @@ class CubePoseEstimator:
         
         return K, dist_coeffs
     
-
+    def simple_segmentation_visualization(self, rgb_img, annotations, output_dir, base_name):
+        """简单的分割结果可视化，显示所有分割对象并标注ID"""
+        # 创建可视化图像
+        vis_img = rgb_img.copy()
+        
+        # 为每个分割对象添加颜色和ID标注
+        for i, annotation in enumerate(annotations):
+            # 检查annotation的格式
+            if isinstance(annotation, dict):
+                mask = annotation['segmentation']
+            else:
+                # 如果annotation不是字典，直接使用它作为mask
+                mask = annotation
+            
+            mask_bool = self._safe_mask_to_bool(mask)
+            
+            # 生成随机颜色
+            color = np.random.randint(0, 255, 3).tolist()
+            
+            # 在掩码区域应用颜色
+            vis_img[mask_bool] = vis_img[mask_bool] * 0.7 + np.array(color) * 0.3
+            
+            # 计算质心用于标注ID
+            y_coords, x_coords = np.where(mask_bool)
+            if len(y_coords) > 0:
+                centroid_y, centroid_x = int(np.mean(y_coords)), int(np.mean(x_coords))
+                
+                # 标注ID
+                cv2.putText(vis_img, str(i+1), (centroid_x-10, centroid_y+5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                cv2.circle(vis_img, (centroid_x, centroid_y), 5, (255, 255, 255), -1)
+        
+        # 保存结果
+        output_path = os.path.join(output_dir, base_name + "_all_segmentations.jpg")
+        cv2.imwrite(output_path, cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
+        
+        return output_path
+    
+    def visualize_box_prompt_result(self, rgb_img, box_prompt, selected_corners, output_path):
+        """可视化box_prompt和选中的角点"""
+        vis_img = rgb_img.copy()
+        
+        try:
+            # 解析box_prompt
+            if isinstance(box_prompt, str):
+                box_prompt = ast.literal_eval(box_prompt)
+            
+            # 绘制box_prompt区域（仅当box_prompt不为None时）
+            if box_prompt is not None and isinstance(box_prompt, list) and len(box_prompt) == 4:  # [x, y, x2, y2] 格式
+                x, y, x2, y2 = box_prompt
+                
+                # 绘制box_prompt区域（半透明蓝色）
+                overlay = vis_img.copy()
+                cv2.rectangle(overlay, (int(x), int(y)), (int(x2), int(y2)), (255, 0, 0), -1)
+                cv2.addWeighted(overlay, 0.3, vis_img, 0.7, 0, vis_img)
+                
+                # 绘制box_prompt边界（蓝色）
+                cv2.rectangle(vis_img, (int(x), int(y)), (int(x2), int(y2)), (255, 0, 0), 2)
+                
+                # 绘制左上角点和右下角点
+                cv2.circle(vis_img, (int(x), int(y)), 8, (0, 255, 255), -1)  # 左上角点（黄色）
+                cv2.circle(vis_img, (int(x), int(y)), 8, (255, 255, 255), 2)  # 白色边框
+                cv2.putText(vis_img, "TL", (int(x)+10, int(y)-10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                
+                cv2.circle(vis_img, (int(x2), int(y2)), 8, (0, 255, 255), -1)  # 右下角点（黄色）
+                cv2.circle(vis_img, (int(x2), int(y2)), 8, (255, 255, 255), 2)  # 白色边框
+                cv2.putText(vis_img, "BR", (int(x2)+10, int(y2)-10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                
+                # 标注box
+                cv2.putText(vis_img, "Box Prompt", (int(x), int(y)-30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            
+            # 绘制选中的角点
+            if selected_corners is not None:
+                for i, (x, y) in enumerate(selected_corners):
+                    # 绘制角点（绿色圆圈）
+                    cv2.circle(vis_img, (int(x), int(y)), 12, (0, 255, 0), -1)
+                    cv2.circle(vis_img, (int(x), int(y)), 12, (255, 255, 255), 2)
+                    
+                    # 标注角点编号
+                    cv2.putText(vis_img, str(i+1), (int(x)+15, int(y)-15), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                
+                # 绘制角点之间的连线（绿色）
+                for i in range(4):
+                    pt1 = selected_corners[i]
+                    pt2 = selected_corners[(i+1) % 4]
+                    cv2.line(vis_img, (int(pt1[0]), int(pt1[1])), 
+                            (int(pt2[0]), int(pt2[1])), (0, 255, 0), 3)
+                
+                # 根据是否有box_prompt添加不同的标题
+                if box_prompt is not None:
+                    cv2.putText(vis_img, "Selected Corners in Box Prompt", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                else:
+                    cv2.putText(vis_img, "Selected Corners", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            else:
+                # 根据是否有box_prompt添加不同的标题
+                if box_prompt is not None:
+                    cv2.putText(vis_img, "No Corners Found in Box Prompt", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                else:
+                    cv2.putText(vis_img, "No Corners Found", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+        
+        except Exception as e:
+            print(f"可视化box_prompt时出错: {e}")
+        
+        # 保存结果
+        cv2.imwrite(output_path, cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
+        
+        return vis_img
     
     def _get_corner_depths(self, corners_2d, depth_img):
         """根据2D角点和深度图获取3D相机坐标，以中心点深度为参考进行估计"""
@@ -284,6 +400,7 @@ class CubePoseEstimator:
         
         # 提取欧拉角（ZYX顺序）
         sy = np.sqrt(R[0,0] * R[0,0] + R[1,0] * R[1,0])
+        # sy = np.sqrt(R[2,1]**2 + R[2,2]**2)
         
         if sy > 1e-6:  # 非奇异情况
             roll = np.arctan2(R[2,1], R[2,2])      # 绕X轴旋转（Roll）
@@ -319,6 +436,82 @@ class CubePoseEstimator:
         if hasattr(mask_np, 'cpu'):
             mask_np = mask_np.cpu().numpy()
         return mask_np.astype(bool)
+    
+    def _sort_corners_clockwise_from_top_left(self, corners):
+        """
+        将角点按左上角为1号角点，顺时针顺序排列
+        角点顺序：左上(1) -> 右上(2) -> 右下(3) -> 左下(4)
+        """
+        if len(corners) != 4:
+            return corners
+        
+        # 计算中心点
+        center = np.mean(corners, axis=0)
+        
+        # 计算每个角点相对于中心的角度
+        angles = []
+        for corner in corners:
+            dx = corner[0] - center[0]
+            dy = corner[1] - center[1]
+            angle = np.arctan2(dy, dx)
+            angles.append(angle)
+        
+        # 按角度排序，确保顺时针顺序
+        sorted_indices = np.argsort(angles)
+        corners_sorted = corners[sorted_indices]
+        
+        # 找到左上角点：选择距离原点(0,0)最近的角点
+        top_left_idx = 0
+        min_distance = float('inf')
+        
+        for i, corner in enumerate(corners_sorted):
+            distance = np.sqrt(corner[0]**2 + corner[1]**2)  # 距离原点(0,0)的距离
+            if distance < min_distance:
+                min_distance = distance
+                top_left_idx = i
+        
+        # 重新排列角点，使左上角为第一个
+        corners_reordered = np.roll(corners_sorted, -top_left_idx, axis=0)
+        
+        # 检查边长关系，确保12是短边，14是长边
+        # 计算边长：12(左上到右上), 14(左上到左下), 23(右上到右下), 34(右下到左下)
+        edge_12 = np.sqrt((corners_reordered[1][0] - corners_reordered[0][0])**2 + 
+                         (corners_reordered[1][1] - corners_reordered[0][1])**2)  # 12边
+        edge_14 = np.sqrt((corners_reordered[3][0] - corners_reordered[0][0])**2 + 
+                         (corners_reordered[3][1] - corners_reordered[0][1])**2)  # 14边
+        edge_23 = np.sqrt((corners_reordered[2][0] - corners_reordered[1][0])**2 + 
+                         (corners_reordered[2][1] - corners_reordered[1][1])**2)  # 23边
+        edge_34 = np.sqrt((corners_reordered[3][0] - corners_reordered[2][0])**2 + 
+                         (corners_reordered[3][1] - corners_reordered[2][1])**2)  # 34边
+        
+        # 判断是否需要调整顺序
+        # 期望：12和34是短边，14和23是长边
+        short_edges = [edge_12, edge_34]
+        long_edges = [edge_14, edge_23]
+        
+        avg_short = np.mean(short_edges)
+        avg_long = np.mean(long_edges)
+        
+        # 如果12边比14边长，说明需要调整顺序
+        if edge_12 > edge_14:
+            print(f"边长检查：12边({edge_12:.3f}) > 14边({edge_14:.3f})，需要调整顺序")
+            # 将1,2,3,4顺序改成4,1,2,3
+            corners_reordered = np.roll(corners_reordered, -1, axis=0)
+            print(f"调整后角点: {corners_reordered}")
+        else:
+            print(f"边长检查：12边({edge_12:.3f}) <= 14边({edge_14:.3f})，顺序正确")
+        
+        # 添加调试信息
+        print(f"原始角点: {corners}")
+        print(f"角度: {[f'{a:.3f}' for a in angles]}")
+        print(f"排序后角点: {corners_sorted}")
+        distances = [np.sqrt(corner[0]**2 + corner[1]**2) for corner in corners_sorted]
+        print(f"距离原点: {[f'{d:.3f}' for d in distances]}")
+        print(f"左上角索引: {top_left_idx}, 左上角: {corners_sorted[top_left_idx]}, 距离: {min_distance:.3f}")
+        print(f"边长: 12={edge_12:.3f}, 14={edge_14:.3f}, 23={edge_23:.3f}, 34={edge_34:.3f}")
+        print(f"最终角点: {corners_reordered}")
+        
+        return corners_reordered
     
     def _calculate_angles_and_edges(self, points):
         """计算4个点的角度和边长"""
@@ -469,7 +662,7 @@ class CubePoseEstimator:
         
         return total_score
     
-    def _filter_cube_segments(self, annotations, depth_img, min_area=3000, max_area=50000):
+    def _filter_cube_segments(self, annotations, depth_img, min_area=4500, max_area=50000):
         """基于几何特征和深度信息筛选立方体上立面分割"""
         filtered_annotations = []
         
@@ -505,12 +698,6 @@ class CubePoseEstimator:
                 bbox_points = self._optimize_parallelogram_fit(points, mask_np)
                 if bbox_points is None:
                     continue
-                
-                # 按顺时针顺序排列角点
-                center = np.mean(bbox_points, axis=0)
-                angles = np.arctan2(bbox_points[:, 1] - center[1], bbox_points[:, 0] - center[0])
-                sorted_indices = np.argsort(angles)
-                bbox_points = bbox_points[sorted_indices]
                 
                 # 使用公共函数计算角度和边长
                 angles_deg, edges = self._calculate_angles_and_edges(bbox_points)
@@ -694,6 +881,9 @@ class CubePoseEstimator:
         if bbox_points is None:
             return None
         
+        # 按左上角为1号角点，顺时针顺序排列角点
+        bbox_points = self._sort_corners_clockwise_from_top_left(bbox_points)
+        
         corners = bbox_points.tolist()
         
         # 验证角点
@@ -720,20 +910,30 @@ class CubePoseEstimator:
                 return False
         return True
     
-    def estimate_pose(self, rgb_img, depth_img, box_prompt=None, cube_dimensions=(0.117, 0.06)):
+    def estimate_pose(self, rgb_img, depth_img, box_prompt=None, cube_dimensions=(0.117, 0.06), output_dir="./output/", base_name="result"):
         """
         估计立方体姿态
         
         Args:
-            rgb_img: RGB图像
+            rgb_img: RGB图像（方法会自动检测并转换BGR格式）
             depth_img: 深度图像
             box_prompt: 边界框提示 [x, y, x2, y2]，如果为None则使用整个图像
             cube_dimensions: 立方体尺寸 (width, height) in meters
+            output_dir: 输出目录路径
+            base_name: 输出文件的基础名称
             
         Returns:
             center_position: 上立面中心在相机坐标系中的位置 [x, y, z]
             euler_angles: 上立面坐标系在相机坐标系中的旋转 [roll, pitch, yaw] in degrees
         """
+        # 确保输入图像是RGB格式
+        if len(rgb_img.shape) == 3 and rgb_img.shape[2] == 3:
+            # 检查是否是BGR格式（OpenCV默认格式）
+            # 通过检查第一个像素的B和R通道来判断
+            if rgb_img[0, 0, 0] > rgb_img[0, 0, 2]:  # B > R，可能是BGR格式
+                print("检测到BGR格式图像，正在转换为RGB格式...")
+                rgb_img = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2RGB)
+        
         # 初始化FastSAM
         model = FastSAM('FastSAM-x.pt')
         
@@ -749,6 +949,14 @@ class CubePoseEstimator:
         
         if ann is None or len(ann) == 0:
             return None, None
+        
+        # 确保输出目录存在
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 简单可视化所有分割结果
+        print(f"\n检测到 {len(ann)} 个分割对象，正在生成可视化...")
+        simple_vis_path = self.simple_segmentation_visualization(rgb_img, ann, output_dir, base_name)
+        print(f"所有分割结果可视化已保存到: {simple_vis_path}")
         
         # 筛选立方体分割
         filtered_annotations = self._filter_cube_segments(ann, depth_img)
@@ -826,6 +1034,15 @@ class CubePoseEstimator:
                 selected_corners = valid_corners[0]
                 print(f"=== 未使用box_prompt,自动选择角点: {selected_corners}")
         
+        # 可视化选中的角点（无论是否有box_prompt）
+        if box_prompt is not None:
+            box_prompt_vis_path = os.path.join(output_dir, base_name + "_box_prompt_result.jpg")
+        else:
+            box_prompt_vis_path = os.path.join(output_dir, base_name + "_selected_corners.jpg")
+        
+        box_prompt_vis = self.visualize_box_prompt_result(rgb_img, box_prompt, selected_corners, box_prompt_vis_path)
+        print(f"角点可视化已保存到: {box_prompt_vis_path}")
+        
         # 获取3D相机坐标
         result = self._get_corner_depths(selected_corners, depth_img)
         if result is None:
@@ -834,7 +1051,8 @@ class CubePoseEstimator:
         corners_3d_camera, depth_validity, center_depth_mean, center_depth_std = result
         
         # 构建立方体物体坐标系
-        width_mm, height_mm = cube_dimensions
+        # width_mm, height_mm = cube_dimensions
+        height_mm, width_mm = cube_dimensions
         half_width = width_mm / 2.0
         half_height = height_mm / 2.0
         
@@ -850,6 +1068,8 @@ class CubePoseEstimator:
         R, t = self._solve_rigid_transform_svd(corners_3d_camera, corners_3d_object)
         if R is None or t is None:
             return None, None
+        print(f"旋转矩阵R:")
+        print(f"{R}")
         
         # 计算上立面中心在相机坐标系中的位置
         center_position = t  # 因为物体坐标系原点就是上立面中心
@@ -866,15 +1086,17 @@ if __name__ == "__main__":
     estimator = CubePoseEstimator()
     
     # 加载图像
-    # rgb_img = cv2.imread("./robot_img/rgb/rgb_0000.jpg")
-    # depth_img = cv2.imread("./robot_img/depth/depth_0000.png", cv2.IMREAD_ANYDEPTH)
-    rgb_img = cv2.imread("./code_imgs/10/rgb/rgb_0000.jpg")
-    depth_img = cv2.imread("./code_imgs/10/depth/depth_0000.png", cv2.IMREAD_UNCHANGED)
+    # rgb_img = cv2.imread("./robot_img2/1/rgb/rgb_0000.jpg")
+    # depth_img = cv2.imread("./robot_img2/1/depth/depth_0000.png", cv2.IMREAD_UNCHANGED)
+    # rgb_img = cv2.imread("./code_imgs/4/rgb/rgb_0000.jpg")
+    # depth_img = cv2.imread("./code_imgs/4/depth/depth_0000.png", cv2.IMREAD_UNCHANGED)
+    rgb_img = cv2.imread("./code_imgs_Aruco/2/rgb/rgb_0000.jpg")
+    depth_img = cv2.imread("./code_imgs_Aruco/2/depth/depth_0000.png", cv2.IMREAD_UNCHANGED)
     depth_img = depth_img.astype(np.float32) / 1000.0
     
     # 估计姿态
-    # center_pos, euler_angles = estimator.estimate_pose(rgb_img, depth_img, box_prompt=[500, 200, 1100, 700])
-    center_pos, euler_angles = estimator.estimate_pose(rgb_img, depth_img)
+    # center_pos, euler_angles = estimator.estimate_pose(rgb_img, depth_img, box_prompt=[500, 200, 1100, 700], output_dir="./output/", base_name="rgb_0000")
+    center_pos, euler_angles = estimator.estimate_pose(rgb_img, depth_img, output_dir="./output/", base_name="rgb_0000")
     if center_pos is not None:
         print(f"中心位置: {center_pos}")
         print(f"欧拉角: {euler_angles}")
