@@ -157,6 +157,73 @@ class CubePoseEstimator:
         
         return vis_img
     
+    def visualize_coordinate_axes(self, rgb_img, center, x_axis_vec, y_axis_vec, output_dir, base_name):
+        """可视化以中心点为原点的X轴和Y轴"""
+        vis_img = rgb_img.copy()
+        
+        # 绘制中心点
+        center_x, center_y = int(center[0]), int(center[1])
+        cv2.circle(vis_img, (center_x, center_y), 8, (255, 255, 255), -1)  # 白色中心点
+        cv2.circle(vis_img, (center_x, center_y), 8, (0, 0, 0), 2)  # 黑色边框
+        cv2.putText(vis_img, "Center", (center_x+10, center_y-10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # 绘制Y轴（红色，指向图像上方向）
+        y_axis_length = 100  # Y轴长度
+        y_end_x = int(center_x + y_axis_vec[0] * y_axis_length)
+        y_end_y = int(center_y + y_axis_vec[1] * y_axis_length)
+        cv2.arrowedLine(vis_img, (center_x, center_y), (y_end_x, y_end_y), 
+                       (0, 0, 255), 3, tipLength=0.2)  # 红色箭头
+        cv2.putText(vis_img, "Y-axis", (y_end_x+5, y_end_y-5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        
+        # 绘制X轴（绿色，垂直于Y轴）
+        x_axis_length = 100  # X轴长度
+        x_end_x = int(center_x + x_axis_vec[0] * x_axis_length)
+        x_end_y = int(center_y + x_axis_vec[1] * x_axis_length)
+        cv2.arrowedLine(vis_img, (center_x, center_y), (x_end_x, x_end_y), 
+                       (0, 255, 0), 3, tipLength=0.2)  # 绿色箭头
+        cv2.putText(vis_img, "X-axis", (x_end_x+5, x_end_y-5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        # 绘制象限标注
+        quadrant_length = 50
+        # 一象限
+        q1_x = int(center_x + x_axis_vec[0] * quadrant_length + y_axis_vec[0] * quadrant_length)
+        q1_y = int(center_y + x_axis_vec[1] * quadrant_length + y_axis_vec[1] * quadrant_length)
+        cv2.putText(vis_img, "Q1", (q1_x, q1_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # 四象限
+        q4_x = int(center_x + x_axis_vec[0] * quadrant_length - y_axis_vec[0] * quadrant_length)
+        q4_y = int(center_y + x_axis_vec[1] * quadrant_length - y_axis_vec[1] * quadrant_length)
+        cv2.putText(vis_img, "Q4", (q4_x, q4_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # 三象限
+        q3_x = int(center_x - x_axis_vec[0] * quadrant_length - y_axis_vec[0] * quadrant_length)
+        q3_y = int(center_y - x_axis_vec[1] * quadrant_length - y_axis_vec[1] * quadrant_length)
+        cv2.putText(vis_img, "Q3", (q3_x, q3_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # 二象限
+        q2_x = int(center_x - x_axis_vec[0] * quadrant_length + y_axis_vec[0] * quadrant_length)
+        q2_y = int(center_y - x_axis_vec[1] * quadrant_length + y_axis_vec[1] * quadrant_length)
+        cv2.putText(vis_img, "Q2", (q2_x, q2_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # 添加标题
+        cv2.putText(vis_img, "Coordinate System Visualization", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(vis_img, "Red: Y-axis (up), Green: X-axis", (10, 60), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # 保存结果
+        output_path = os.path.join(output_dir, base_name + "_coordinate_axes.jpg")
+        cv2.imwrite(output_path, cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
+        
+        return output_path
+    
     def _get_corner_depths(self, corners_2d, depth_img):
         """根据2D角点和深度图获取3D相机坐标，以中心点深度为参考进行估计"""
         if len(corners_2d) != 4:
@@ -190,9 +257,9 @@ class CubePoseEstimator:
                             center_depths.append(neighbor_depth)
             
             if center_depths:
-                center_depth_mean = np.mean(center_depths)
-                center_depth_std = np.std(center_depths)
-                print(f"  中心点深度: 均值={center_depth_mean:.3f}, 标准差={center_depth_std:.3f} (基于{len(center_depths)}个像素)")
+                center_depth_mean = float(np.mean(center_depths))
+                center_depth_std = float(np.std(center_depths))
+                print(f"  中心点深度: 均值={center_depth_mean}, 标准差={center_depth_std} (基于{len(center_depths)}个像素)")
                 return center_depth_mean, center_depth_std, center_depths
             else:
                 print(f"  警告: 中心点周围无法获取有效深度")
@@ -225,25 +292,25 @@ class CubePoseEstimator:
                     
                     if filtered_depths:
                         # 使用筛选后的深度值计算估计值
-                        estimated_depth = np.median(filtered_depths)
-                        print(f"    筛选后深度范围: {min(filtered_depths):.3f} ~ {max(filtered_depths):.3f}")
-                        print(f"    筛选后估计深度: {estimated_depth:.3f}")
+                        estimated_depth = float(np.median(filtered_depths))
+                        print(f"    筛选后深度范围: {min(filtered_depths)} ~ {max(filtered_depths)}")
+                        print(f"    筛选后估计深度: {estimated_depth}")
                     else:
                         # 如果筛选后没有深度值，使用中心点深度
-                        print(f"   收集到的深度范围: {min(valid_depths):.3f} ~ {max(valid_depths):.3f}")            
-                        print(f" ×××××筛选后无有效深度值，使用中心点深度: {center_depth_mean:.3f}")
-                        estimated_depth = center_depth_mean
+                        print(f"   收集到的深度范围: {min(valid_depths)} ~ {max(valid_depths)}")            
+                        print(f" ×××××筛选后无有效深度值，使用中心点深度: {center_depth_mean}")
+                        estimated_depth = float(center_depth_mean)
                 else:
                     # 如果没有中心点参考，使用原始方法
-                    estimated_depth = np.median(valid_depths)
-                    print(f"    无中心点参考，使用原始估计深度: {estimated_depth:.3f}")
+                    estimated_depth = float(np.median(valid_depths))
+                    print(f"    无中心点参考，使用原始估计深度: {estimated_depth}")
                 
                 return estimated_depth, len(filtered_depths)
             else:
                 # 如果周围没有有效深度，使用中心点深度
                 if center_depth_mean is not None:
-                    print(f"    周围无有效深度，使用中心点深度: {center_depth_mean:.3f}")
-                    return center_depth_mean, 0
+                    print(f"    周围无有效深度，使用中心点深度: {center_depth_mean}")
+                    return float(center_depth_mean), 0
                 else:
                     return None, 0
         
@@ -260,7 +327,7 @@ class CubePoseEstimator:
         else:
             tolerance = 30 * center_depth_std
         tolerance = min(tolerance, 0.05)
-        print(f"  角点深度与中心点深度的允许差异阈值: {tolerance:.3f} *****")
+        print(f"  角点深度与中心点深度的允许差异阈值: {tolerance} *****")
 
 
         
@@ -277,30 +344,30 @@ class CubePoseEstimator:
                         # 根据center_depth_std动态设置tolerance
                         tolerance_center = 12 * center_depth_std  # 使用更严格的标准 (其他地方是15)
                         if abs(depth - center_depth_mean) > tolerance_center:
-                            print(f"  角点 {i+1}: 直接深度 {depth:.3f} 与中心点深度差异较大 (差异: {abs(depth - center_depth_mean):.3f})，尝试重新估计...")
+                            print(f"  角点 {i+1}: 直接深度 {depth} 与中心点深度差异较大 (差异: {abs(depth - center_depth_mean)})，尝试重新估计...")
                             estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, tolerance)
                             if estimated_depth is not None:
                                 depth = estimated_depth
                                 depth_validity.append(False)  # 标记为估计值
-                                print(f"  角点 {i+1}: 重新估计深度 {depth:.3f}")
+                                print(f"  角点 {i+1}: 重新估计深度 {depth}")
                             else:
                                 depth_validity.append(True)  # 保持原始值
-                                print(f"  角点 {i+1}: 保持原始深度 {depth:.3f}")
+                                print(f"  角点 {i+1}: 保持原始深度 {depth}")
                         else:
                             depth_validity.append(True)
-                            print(f"  角点 {i+1}: 直接获取深度 {depth:.3f} (与中心点深度相近，差异: {abs(depth - center_depth_mean):.3f})")
+                            print(f"  角点 {i+1}: 直接获取深度 {depth} (与中心点深度相近，差异: {abs(depth - center_depth_mean)})")
                     else:
                         depth_validity.append(True)
-                        print(f"  角点 {i+1}: 直接获取深度 {depth:.3f}")
+                        print(f"  角点 {i+1}: 直接获取深度 {depth}")
                 else:
                     # 深度无效，从周围像素估计
-                    print(f"  角点 {i+1}: 直接深度无效 ({depth:.3f})，尝试从周围像素估计...")
+                    print(f"  角点 {i+1}: 直接深度无效 ({depth})，尝试从周围像素估计...")
                     estimated_depth, neighbor_count = estimate_depth_from_neighbors(x, y, depth_img, center_depth_mean, center_depth_std, tolerance)
                     
                     if estimated_depth is not None:
                         depth = estimated_depth
                         depth_validity.append(False)  # 标记为估计值
-                        print(f"  角点 {i+1}: 从 {neighbor_count} 个邻居像素估计深度 {depth:.3f}")
+                        print(f"  角点 {i+1}: 从 {neighbor_count} 个邻居像素估计深度 {depth}")
                     else:
                         print(f"  角点 {i+1}: 无法估计深度，跳过")
                         return None, None, None, None
@@ -311,13 +378,13 @@ class CubePoseEstimator:
                 
                 # 根据深度和归一化坐标计算3D相机坐标
                 # 归一化坐标是Z=1平面上的点，所以3D坐标为 (X*Z, Y*Z, Z)
-                X_camera = normalized_coord[0] * depth
-                Y_camera = normalized_coord[1] * depth
-                Z_camera = depth
+                X_camera = float(normalized_coord[0] * depth)
+                Y_camera = float(normalized_coord[1] * depth)
+                Z_camera = float(depth)
                 
                 corners_3d_camera.append([X_camera, Y_camera, Z_camera])
                 status = "直接" if depth_validity[-1] else "估计"
-                print(f"  角点 {i+1}: 像素({x},{y}) -> {status}深度{depth:.3f} -> 相机坐标({X_camera:.3f}, {Y_camera:.3f}, {Z_camera:.3f})")
+                print(f"  角点 {i+1}: 像素({x},{y}) -> {status}深度{depth} -> 相机坐标({X_camera}, {Y_camera}, {Z_camera})")
             else:
                 print(f"  角点 {i+1}: 坐标({x},{y})超出图像范围")
                 return None
@@ -329,10 +396,10 @@ class CubePoseEstimator:
             depth_std = np.std(all_depths)
             depth_mean = np.mean(all_depths)
             
-            print(f"  所有角点深度: {[f'{d:.3f}' for d in all_depths]}")
-            print(f"  深度均值: {depth_mean:.3f}, 标准差: {depth_std:.3f}")
-            print(f"  中心点参考深度: {center_depth_mean:.3f}")
-            print(f"  中心点深度标准差: {center_depth_std:.3f}")
+            print(f"  所有角点深度: {[f'{d}' for d in all_depths]}")
+            print(f"  深度均值: {depth_mean}, 标准差: {depth_std}")
+            print(f"  中心点参考深度: {center_depth_mean}")
+            print(f"  中心点深度标准差: {center_depth_std}")
             
             # 检查每个角点深度与中心点深度的差异
             # 根据center_depth_std动态设置tolerance
@@ -344,20 +411,20 @@ class CubePoseEstimator:
             for i, depth in enumerate(all_depths):
                 diff = abs(depth - center_depth_mean)
                 if diff > tolerance:
-                    print(f"  警告: 角点 {i+1} 深度 {depth:.3f} 与中心点深度差异较大 ({diff:.3f} > {tolerance:.3f})")
+                    print(f"  警告: 角点 {i+1} 深度 {depth} 与中心点深度差异较大 ({diff} > {tolerance})")
                 else:
-                    print(f"  角点 {i+1} 深度 {depth:.3f} 与中心点深度一致 (差异: {diff:.3f} <= {tolerance:.3f})")
+                    print(f"  角点 {i+1} 深度 {depth} 与中心点深度一致 (差异: {diff} <= {tolerance})")
                     consistent_count += 1
             
             print(f"  深度一致性统计: {consistent_count}/4 个角点与中心点深度一致")
             
             # 检查角点间深度的一致性
             max_depth_diff = max(all_depths) - min(all_depths)
-            print(f"  角点间最大深度差异: {max_depth_diff:.3f}")
+            print(f"  角点间最大深度差异: {max_depth_diff}")
             if max_depth_diff > 20 * center_depth_std:
-                print(f"  警告: 角点间深度差异较大，超过20倍中心点深度标准差({20 * center_depth_std:.3f})，可能影响3D变换精度")
+                print(f"  警告: 角点间深度差异较大，超过20倍中心点深度标准差({20 * center_depth_std})，可能影响3D变换精度")
             else:
-                print(f"  角点间深度差异在合理范围内，20倍中心点深度标准差为{20 * center_depth_std:.3f}")
+                print(f"  角点间深度差异在合理范围内，20倍中心点深度标准差为{20 * center_depth_std}")
         
         return np.array(corners_3d_camera, dtype=np.float32), depth_validity, center_depth_mean, center_depth_std
     
@@ -439,8 +506,9 @@ class CubePoseEstimator:
     
     def _sort_corners_clockwise_from_top_left(self, corners):
         """
-        将角点按左上角为1号角点，顺时针顺序排列
-        角点顺序：左上(1) -> 右上(2) -> 右下(3) -> 左下(4)
+        基于长边和短边重新定义角点顺序
+        定义经过中心点平行于两条长边并垂直于短边的线，该线朝向图像上半区域的为正方向
+        该线与短边交点，开始顺时针的角点顺序是2,3,4,1
         """
         if len(corners) != 4:
             return corners
@@ -460,58 +528,223 @@ class CubePoseEstimator:
         sorted_indices = np.argsort(angles)
         corners_sorted = corners[sorted_indices]
         
-        # 找到左上角点：选择距离原点(0,0)最近的角点
-        top_left_idx = 0
-        min_distance = float('inf')
+        # 计算所有边长
+        edges = []
+        for i in range(4):
+            pt1 = corners_sorted[i]
+            pt2 = corners_sorted[(i+1) % 4]
+            edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
+            edges.append(edge_length)
         
-        for i, corner in enumerate(corners_sorted):
-            distance = np.sqrt(corner[0]**2 + corner[1]**2)  # 距离原点(0,0)的距离
-            if distance < min_distance:
-                min_distance = distance
-                top_left_idx = i
+        # 找到长边和短边
+        # 在矩形/平行四边形中，边长应该是：长边、短边、长边、短边的交替排列
+        # 找到最长的边作为长边
+        max_edge_length = max(edges)
+        min_edge_length = min(edges)
         
-        # 重新排列角点，使左上角为第一个
-        corners_reordered = np.roll(corners_sorted, -top_left_idx, axis=0)
+        # 找到长边的索引
+        long_edge_indices = []
+        short_edge_indices = []
+        for i, edge_length in enumerate(edges):
+            if edge_length > (max_edge_length + min_edge_length) / 2:  # 使用平均值作为分界线
+                long_edge_indices.append(i)
+            else:
+                short_edge_indices.append(i)
         
-        # 检查边长关系，确保12是短边，14是长边
-        # 计算边长：12(左上到右上), 14(左上到左下), 23(右上到右下), 34(右下到左下)
-        edge_12 = np.sqrt((corners_reordered[1][0] - corners_reordered[0][0])**2 + 
-                         (corners_reordered[1][1] - corners_reordered[0][1])**2)  # 12边
-        edge_14 = np.sqrt((corners_reordered[3][0] - corners_reordered[0][0])**2 + 
-                         (corners_reordered[3][1] - corners_reordered[0][1])**2)  # 14边
-        edge_23 = np.sqrt((corners_reordered[2][0] - corners_reordered[1][0])**2 + 
-                         (corners_reordered[2][1] - corners_reordered[1][1])**2)  # 23边
-        edge_34 = np.sqrt((corners_reordered[3][0] - corners_reordered[2][0])**2 + 
-                         (corners_reordered[3][1] - corners_reordered[2][1])**2)  # 34边
+        print(f"边长: {edges}")
+        print(f"长边索引: {long_edge_indices}")
+        print(f"短边索引: {short_edge_indices}")
         
-        # 判断是否需要调整顺序
-        # 期望：12和34是短边，14和23是长边
-        short_edges = [edge_12, edge_34]
-        long_edges = [edge_14, edge_23]
+        # 长边对应的角点索引（长边连接的两个角点）
+        long_edge_corners = []
+        for idx in long_edge_indices:
+            long_edge_corners.extend([idx, (idx + 1) % 4])
+        long_edge_corners = list(set(long_edge_corners))  # 去重
         
-        avg_short = np.mean(short_edges)
-        avg_long = np.mean(long_edges)
+        # 短边对应的角点索引（短边连接的两个角点）
+        short_edge_corners = []
+        for idx in short_edge_indices:
+            short_edge_corners.extend([idx, (idx + 1) % 4])
+        short_edge_corners = list(set(short_edge_corners))  # 去重
         
-        # 如果12边比14边长，说明需要调整顺序
-        if edge_12 > edge_14:
-            print(f"边长检查：12边({edge_12:.3f}) > 14边({edge_14:.3f})，需要调整顺序")
-            # 将1,2,3,4顺序改成4,1,2,3
-            corners_reordered = np.roll(corners_reordered, -1, axis=0)
-            print(f"调整后角点: {corners_reordered}")
+        print(f"长边角点索引: {long_edge_corners}")
+        print(f"短边角点索引: {short_edge_corners}")
+        
+        # 计算长边的方向向量（使用第一条长边）
+        if len(long_edge_indices) > 0:
+            long_edge_idx = long_edge_indices[0]
+            long_edge_start = corners_sorted[long_edge_idx]
+            long_edge_end = corners_sorted[(long_edge_idx + 1) % 4]
+            long_edge_vec = np.array([long_edge_end[0] - long_edge_start[0], 
+                                     long_edge_end[1] - long_edge_start[1]])
+            long_edge_vec = long_edge_vec / np.linalg.norm(long_edge_vec)  # 归一化
         else:
-            print(f"边长检查：12边({edge_12:.3f}) <= 14边({edge_14:.3f})，顺序正确")
+            # 如果没有找到长边，使用第一条边
+            long_edge_vec = np.array([corners_sorted[1][0] - corners_sorted[0][0], 
+                                     corners_sorted[1][1] - corners_sorted[0][1]])
+            long_edge_vec = long_edge_vec / np.linalg.norm(long_edge_vec)
         
-        # 添加调试信息
+        # 计算垂直于长边的方向向量（即平行于短边的方向）
+        perp_vec = np.array([-long_edge_vec[1], long_edge_vec[0]])
+        
+        # 确定垂直线的正方向（朝向图像上半区域）
+        if perp_vec[1] < 0:  # 如果y分量为负，说明指向下半区域，需要翻转
+            perp_vec = -perp_vec
+        
+        print(f"长边方向向量: {long_edge_vec}")
+        print(f"垂直方向向量: {perp_vec}")
+        
+        # 找到短边的中点（使用第一条短边）
+        if len(short_edge_indices) > 0:
+            short_edge_idx = short_edge_indices[0]
+            short_edge_mid = (corners_sorted[short_edge_idx] + 
+                             corners_sorted[(short_edge_idx + 1) % 4]) / 2
+            
+            # 计算从中心点出发，沿平行方向与短边的交点
+            # 使用参数方程：center + t * long_edge_vec = short_edge_mid + s * short_edge_vec
+            short_edge_vec = np.array([corners_sorted[(short_edge_idx + 1) % 4][0] - corners_sorted[short_edge_idx][0],
+                                      corners_sorted[(short_edge_idx + 1) % 4][1] - corners_sorted[short_edge_idx][1]])
+        else:
+            # 如果没有找到短边，使用中心点作为交点
+            short_edge_mid = center
+            short_edge_vec = np.array([1, 0])  # 默认向量
+        
+        # 求解交点参数
+        # center + t * long_edge_vec = short_edge_mid + s * short_edge_vec
+        # 转换为矩阵形式求解 t 和 s
+        A = np.column_stack([long_edge_vec, -short_edge_vec])
+        b = short_edge_mid - center
+        
+        try:
+            solution = np.linalg.solve(A, b)
+            t = solution[0]
+            intersection_point = center + t * long_edge_vec
+        except np.linalg.LinAlgError:
+            # 如果矩阵奇异，使用短边中点作为交点
+            intersection_point = short_edge_mid
+        
+        print(f"短边中点: {short_edge_mid}")
+        
+        # 建立以中心点为原点的二维坐标系
+        # Y轴：平行于长边方向
+        # X轴：垂直于Y轴的方向
+        
+        # Y轴方向向量（平行于长边方向）
+        y_axis_vec = long_edge_vec  # 使用长边方向向量
+        
+        # X轴方向向量（垂直于Y轴，顺时针旋转90度）
+        x_axis_vec = np.array([-y_axis_vec[1], y_axis_vec[0]])
+        
+        print(f"Y轴方向向量: {y_axis_vec}")
+        print(f"X轴方向向量: {x_axis_vec}")
+        
+        # 调用可视化函数（需要从外部传入rgb_img）
+        # 注意：这里暂时注释掉，因为_sort_corners_clockwise_from_top_left函数没有rgb_img参数
+        # 可以在estimate_pose函数中调用可视化
+        # output_dir = "./output/"
+        # base_name = "coordinate_axes"
+        # try:
+        #     axes_vis_path = self.visualize_coordinate_axes(rgb_img, center, x_axis_vec, y_axis_vec, output_dir, base_name)
+        #     print(f"坐标系可视化已保存到: {axes_vis_path}")
+        # except Exception as e:
+        #     print(f"坐标系可视化失败: {e}")
+        
+        # 计算每个角点在新坐标系中的坐标
+        corner_coords = []
+        for corner in corners_sorted:
+            # 计算角点相对于中心点的向量
+            relative_vec = np.array([corner[0] - center[0], corner[1] - center[1]])
+            
+            # 计算在新坐标系中的坐标
+            x_coord = np.dot(relative_vec, x_axis_vec)  # X坐标
+            y_coord = np.dot(relative_vec, y_axis_vec)  # Y坐标
+            
+            corner_coords.append((x_coord, y_coord))
+            print(f"角点 {corner} 在新坐标系中的坐标: ({x_coord}, {y_coord})")
+        
+        # 根据象限确定角点顺序
+        # 一象限(x>0, y>0): 角点1
+        # 四象限(x>0, y<0): 角点2  
+        # 三象限(x<0, y<0): 角点3
+        # 二象限(x<0, y>0): 角点4
+        
+        corner_1 = None  # 一象限
+        corner_2 = None  # 四象限
+        corner_3 = None  # 三象限
+        corner_4 = None  # 二象限
+        
+        for i, (x_coord, y_coord) in enumerate(corner_coords):
+            if x_coord > 0 and y_coord > 0:  # 一象限
+                corner_1 = corners_sorted[i]
+                print(f"角点1(一象限): {corner_1}")
+            elif x_coord > 0 and y_coord < 0:  # 四象限
+                corner_2 = corners_sorted[i]
+                print(f"角点2(四象限): {corner_2}")
+            elif x_coord < 0 and y_coord < 0:  # 三象限
+                corner_3 = corners_sorted[i]
+                print(f"角点3(三象限): {corner_3}")
+            elif x_coord < 0 and y_coord > 0:  # 二象限
+                corner_4 = corners_sorted[i]
+                print(f"角点4(二象限): {corner_4}")
+        
+        # 如果某个象限没有角点，使用最近的角点
+        if corner_1 is None:
+            # 找到距离一象限最近的角点
+            min_dist = float('inf')
+            for i, (x_coord, y_coord) in enumerate(corner_coords):
+                if x_coord > 0 and y_coord > 0:  # 已经在一象限
+                    continue
+                dist = np.sqrt((x_coord - 1)**2 + (y_coord - 1)**2)  # 距离一象限中心(1,1)的距离
+                if dist < min_dist:
+                    min_dist = dist
+                    corner_1 = corners_sorted[i]
+            print(f"角点1(最近一象限): {corner_1}")
+        
+        if corner_2 is None:
+            # 找到距离四象限最近的角点
+            min_dist = float('inf')
+            for i, (x_coord, y_coord) in enumerate(corner_coords):
+                if x_coord > 0 and y_coord < 0:  # 已经在四象限
+                    continue
+                dist = np.sqrt((x_coord - 1)**2 + (y_coord + 1)**2)  # 距离四象限中心(1,-1)的距离
+                if dist < min_dist:
+                    min_dist = dist
+                    corner_2 = corners_sorted[i]
+            print(f"角点2(最近四象限): {corner_2}")
+        
+        if corner_3 is None:
+            # 找到距离三象限最近的角点
+            min_dist = float('inf')
+            for i, (x_coord, y_coord) in enumerate(corner_coords):
+                if x_coord < 0 and y_coord < 0:  # 已经在三象限
+                    continue
+                dist = np.sqrt((x_coord + 1)**2 + (y_coord + 1)**2)  # 距离三象限中心(-1,-1)的距离
+                if dist < min_dist:
+                    min_dist = dist
+                    corner_3 = corners_sorted[i]
+            print(f"角点3(最近三象限): {corner_3}")
+        
+        if corner_4 is None:
+            # 找到距离二象限最近的角点
+            min_dist = float('inf')
+            for i, (x_coord, y_coord) in enumerate(corner_coords):
+                if x_coord < 0 and y_coord > 0:  # 已经在二象限
+                    continue
+                dist = np.sqrt((x_coord + 1)**2 + (y_coord - 1)**2)  # 距离二象限中心(-1,1)的距离
+                if dist < min_dist:
+                    min_dist = dist
+                    corner_4 = corners_sorted[i]
+            print(f"角点4(最近二象限): {corner_4}")
+        
+        # 确保角点顺序正确：1,2,3,4
+        corners_reordered = np.array([corner_1, corner_2, corner_3, corner_4])
+        
         print(f"原始角点: {corners}")
-        print(f"角度: {[f'{a:.3f}' for a in angles]}")
         print(f"排序后角点: {corners_sorted}")
-        distances = [np.sqrt(corner[0]**2 + corner[1]**2) for corner in corners_sorted]
-        print(f"距离原点: {[f'{d:.3f}' for d in distances]}")
-        print(f"左上角索引: {top_left_idx}, 左上角: {corners_sorted[top_left_idx]}, 距离: {min_distance:.3f}")
-        print(f"边长: 12={edge_12:.3f}, 14={edge_14:.3f}, 23={edge_23:.3f}, 34={edge_34:.3f}")
-        print(f"最终角点: {corners_reordered}")
+        print(f"最终角点顺序(1,2,3,4): {corners_reordered}")
         
-        return corners_reordered
+        # 返回排序后的角点和坐标轴信息
+        return corners_reordered, center, x_axis_vec, y_axis_vec
     
     def _calculate_angles_and_edges(self, points):
         """计算4个点的角度和边长"""
@@ -680,7 +913,7 @@ class CubePoseEstimator:
             # 计算面积
             area = np.sum(mask_np)
             if area < min_area or area > max_area:
-                print(f"××× 分割 {i+1} 面积 {area:.3f} 不在 {min_area:.3f} 和 {max_area:.3f} 之间")
+                print(f"××× 分割 {i+1} 面积 {area} 不在 {min_area} 和 {max_area} 之间")
                 continue
             
             # 计算边界框
@@ -764,7 +997,7 @@ class CubePoseEstimator:
                 center_depth_std = np.std(center_depths)
                 
                 corner_depth_tolerance = 0.05  # 角点深度与中心点深度的允许差异阈值
-                print(f" 分割 {i+1} 中心点深度均值: {center_depth:.3f}, 标准差: {center_depth_std:.3f}, 角点深度与中心点深度的允许差异阈值: {corner_depth_tolerance:.5f} (基于{len(center_depths)}个有效像素)")
+                print(f" 分割 {i+1} 中心点深度均值: {center_depth}, 标准差: {center_depth_std}, 角点深度与中心点深度的允许差异阈值: {corner_depth_tolerance} (基于{len(center_depths)}个有效像素)")
                 # if center_depth_std >= 0.02:
                 #     corner_depth_tolerance = 15 * center_depth_std
                 # else:
@@ -807,7 +1040,7 @@ class CubePoseEstimator:
                     
                     # 计算筛选后的深度均值
                     corner_depth_mean = np.mean(filtered_corner_depths)
-                    print(f" 分割 {i+1} 角点 {j+1} 深度均值: {corner_depth_mean:.3f} (筛选后{len(filtered_corner_depths)}个有效值)")
+                    print(f" 分割 {i+1} 角点 {j+1} 深度均值: {corner_depth_mean} (筛选后{len(filtered_corner_depths)}个有效值)")
                 
                 if not corner_depth_valid:
                     continue
@@ -864,7 +1097,7 @@ class CubePoseEstimator:
         
         return filtered_annotations
     
-    def _find_cube_corners(self, mask, depth_img):
+    def _find_cube_corners(self, mask, depth_img, rgb_img=None, output_dir="./output/", base_name="result"):
         """找到立方体上立面的四个角点"""
         # 确保mask是numpy数组
         mask_np = self._safe_mask_to_numpy(mask)
@@ -881,8 +1114,8 @@ class CubePoseEstimator:
         if bbox_points is None:
             return None
         
-        # 按左上角为1号角点，顺时针顺序排列角点
-        bbox_points = self._sort_corners_clockwise_from_top_left(bbox_points)
+        # 按象限顺序排列角点并获取坐标轴信息
+        bbox_points, center, x_axis_vec, y_axis_vec = self._sort_corners_clockwise_from_top_left(bbox_points)
         
         corners = bbox_points.tolist()
         
@@ -895,6 +1128,55 @@ class CubePoseEstimator:
         
         if len(valid_corners) != 4:
             return None
+        
+        # 可视化坐标系（如果提供了rgb_img）
+        if rgb_img is not None:
+            try:
+                # 重新计算中心点和坐标轴
+                center = np.mean(valid_corners, axis=0)
+                
+                # 计算边长
+                edges = []
+                for i in range(4):
+                    pt1 = valid_corners[i]
+                    pt2 = valid_corners[(i+1) % 4]
+                    edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
+                    edges.append(edge_length)
+                
+                # 找到长边和短边
+                max_edge_length = max(edges)
+                min_edge_length = min(edges)
+                
+                # 找到长边的索引
+                long_edge_indices = []
+                for i, edge_length in enumerate(edges):
+                    if edge_length > (max_edge_length + min_edge_length) / 2:
+                        long_edge_indices.append(i)
+                
+                # 计算长边的方向向量
+                if len(long_edge_indices) > 0:
+                    long_edge_idx = long_edge_indices[0]
+                    long_edge_start = valid_corners[long_edge_idx]
+                    long_edge_end = valid_corners[(long_edge_idx + 1) % 4]
+                    long_edge_vec = np.array([long_edge_end[0] - long_edge_start[0], 
+                                             long_edge_end[1] - long_edge_start[1]])
+                    long_edge_vec = long_edge_vec / np.linalg.norm(long_edge_vec)
+                else:
+                    long_edge_vec = np.array([valid_corners[1][0] - valid_corners[0][0], 
+                                             valid_corners[1][1] - valid_corners[0][1]])
+                    long_edge_vec = long_edge_vec / np.linalg.norm(long_edge_vec)
+                
+                # Y轴方向向量（平行于长边方向）
+                y_axis_vec = long_edge_vec
+                
+                # X轴方向向量（垂直于Y轴）
+                x_axis_vec = np.array([-y_axis_vec[1], y_axis_vec[0]])
+                
+                # 调用坐标系可视化
+                axes_vis_path = self.visualize_coordinate_axes(rgb_img, center, x_axis_vec, y_axis_vec, output_dir, base_name)
+                print(f"坐标系可视化已保存到: {axes_vis_path}")
+            except Exception as e:
+                print(f"坐标系可视化失败: {e}")
         
         return valid_corners
     
@@ -978,7 +1260,7 @@ class CubePoseEstimator:
                     # 如果annotation不是字典，直接使用它作为mask
                     mask = annotation
                 
-                corners_2d = self._find_cube_corners(mask, depth_img)
+                corners_2d = self._find_cube_corners(mask, depth_img, rgb_img, output_dir, base_name)
 
                 
                 if corners_2d is not None:
@@ -1012,7 +1294,7 @@ class CubePoseEstimator:
                     # 如果annotation不是字典，直接使用它作为mask
                     mask = annotation
                 
-                corners_2d = self._find_cube_corners(mask, depth_img)
+                corners_2d = self._find_cube_corners(mask, depth_img, rgb_img, output_dir, base_name)
                 
                 if corners_2d is not None:
                     valid_corners.append(corners_2d)
