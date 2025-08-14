@@ -503,7 +503,7 @@ class CubePoseEstimator:
         if hasattr(mask_np, 'cpu'):
             mask_np = mask_np.cpu().numpy()
         return mask_np.astype(bool)
-    
+      
     def _sort_corners_clockwise_from_top_left(self, corners):
         """
         基于长边和短边重新定义角点顺序
@@ -629,8 +629,12 @@ class CubePoseEstimator:
         # Y轴：平行于长边方向
         # X轴：垂直于Y轴的方向
         
-        # Y轴方向向量（平行于长边方向）
+        # Y轴方向向量（平行于长边方向，且朝向图像上半区域）
         y_axis_vec = long_edge_vec  # 使用长边方向向量
+        
+        # 确保Y轴指向图像上半区域（y分量为负，因为图像坐标系Y轴向下为正）
+        if y_axis_vec[1] > 0:
+            y_axis_vec = -y_axis_vec
         
         # X轴方向向量（垂直于Y轴，顺时针旋转90度）
         x_axis_vec = np.array([-y_axis_vec[1], y_axis_vec[0]])
@@ -663,78 +667,78 @@ class CubePoseEstimator:
             print(f"角点 {corner} 在新坐标系中的坐标: ({x_coord}, {y_coord})")
         
         # 根据象限确定角点顺序
-        # 一象限(x>0, y>0): 角点1
-        # 四象限(x>0, y<0): 角点2  
-        # 三象限(x<0, y<0): 角点3
-        # 二象限(x<0, y>0): 角点4
+        # 第一象限(x>0, y>0): 角点2
+        # 第四象限(x>0, y<0): 角点3  
+        # 第三象限(x<0, y<0): 角点4
+        # 第二象限(x<0, y>0): 角点1
         
-        corner_1 = None  # 一象限
-        corner_2 = None  # 四象限
-        corner_3 = None  # 三象限
-        corner_4 = None  # 二象限
+        corner_1 = None  # 第二象限
+        corner_2 = None  # 第一象限
+        corner_3 = None  # 第四象限
+        corner_4 = None  # 第三象限
         
         for i, (x_coord, y_coord) in enumerate(corner_coords):
-            if x_coord > 0 and y_coord > 0:  # 一象限
-                corner_1 = corners_sorted[i]
-                print(f"角点1(一象限): {corner_1}")
-            elif x_coord > 0 and y_coord < 0:  # 四象限
+            if x_coord > 0 and y_coord > 0:  # 第一象限
                 corner_2 = corners_sorted[i]
-                print(f"角点2(四象限): {corner_2}")
-            elif x_coord < 0 and y_coord < 0:  # 三象限
+                print(f"角点2(第一象限): {corner_2}")
+            elif x_coord > 0 and y_coord < 0:  # 第四象限
                 corner_3 = corners_sorted[i]
-                print(f"角点3(三象限): {corner_3}")
-            elif x_coord < 0 and y_coord > 0:  # 二象限
+                print(f"角点3(第四象限): {corner_3}")
+            elif x_coord < 0 and y_coord < 0:  # 第三象限
                 corner_4 = corners_sorted[i]
-                print(f"角点4(二象限): {corner_4}")
+                print(f"角点4(第三象限): {corner_4}")
+            elif x_coord < 0 and y_coord > 0:  # 第二象限
+                corner_1 = corners_sorted[i]
+                print(f"角点1(第二象限): {corner_1}")
         
         # 如果某个象限没有角点，使用最近的角点
         if corner_1 is None:
-            # 找到距离一象限最近的角点
+            # 找到距离第二象限最近的角点
             min_dist = float('inf')
             for i, (x_coord, y_coord) in enumerate(corner_coords):
-                if x_coord > 0 and y_coord > 0:  # 已经在一象限
+                if x_coord < 0 and y_coord > 0:  # 已经在第二象限
                     continue
-                dist = np.sqrt((x_coord - 1)**2 + (y_coord - 1)**2)  # 距离一象限中心(1,1)的距离
+                dist = np.sqrt((x_coord + 1)**2 + (y_coord - 1)**2)  # 距离第二象限中心(-1,1)的距离
                 if dist < min_dist:
                     min_dist = dist
                     corner_1 = corners_sorted[i]
-            print(f"角点1(最近一象限): {corner_1}")
+            print(f"角点1(最近第二象限): {corner_1}")
         
         if corner_2 is None:
-            # 找到距离四象限最近的角点
+            # 找到距离第一象限最近的角点
             min_dist = float('inf')
             for i, (x_coord, y_coord) in enumerate(corner_coords):
-                if x_coord > 0 and y_coord < 0:  # 已经在四象限
+                if x_coord > 0 and y_coord > 0:  # 已经在第一象限
                     continue
-                dist = np.sqrt((x_coord - 1)**2 + (y_coord + 1)**2)  # 距离四象限中心(1,-1)的距离
+                dist = np.sqrt((x_coord - 1)**2 + (y_coord - 1)**2)  # 距离第一象限中心(1,1)的距离
                 if dist < min_dist:
                     min_dist = dist
                     corner_2 = corners_sorted[i]
-            print(f"角点2(最近四象限): {corner_2}")
+            print(f"角点2(最近第一象限): {corner_2}")
         
         if corner_3 is None:
-            # 找到距离三象限最近的角点
+            # 找到距离第四象限最近的角点
             min_dist = float('inf')
             for i, (x_coord, y_coord) in enumerate(corner_coords):
-                if x_coord < 0 and y_coord < 0:  # 已经在三象限
+                if x_coord > 0 and y_coord < 0:  # 已经在第四象限
                     continue
-                dist = np.sqrt((x_coord + 1)**2 + (y_coord + 1)**2)  # 距离三象限中心(-1,-1)的距离
+                dist = np.sqrt((x_coord - 1)**2 + (y_coord + 1)**2)  # 距离第四象限中心(1,-1)的距离
                 if dist < min_dist:
                     min_dist = dist
                     corner_3 = corners_sorted[i]
-            print(f"角点3(最近三象限): {corner_3}")
+            print(f"角点3(最近第四象限): {corner_3}")
         
         if corner_4 is None:
-            # 找到距离二象限最近的角点
+            # 找到距离第三象限最近的角点
             min_dist = float('inf')
             for i, (x_coord, y_coord) in enumerate(corner_coords):
-                if x_coord < 0 and y_coord > 0:  # 已经在二象限
+                if x_coord < 0 and y_coord < 0:  # 已经在第三象限
                     continue
-                dist = np.sqrt((x_coord + 1)**2 + (y_coord - 1)**2)  # 距离二象限中心(-1,1)的距离
+                dist = np.sqrt((x_coord + 1)**2 + (y_coord + 1)**2)  # 距离第三象限中心(-1,-1)的距离
                 if dist < min_dist:
                     min_dist = dist
                     corner_4 = corners_sorted[i]
-            print(f"角点4(最近二象限): {corner_4}")
+            print(f"角点4(最近第三象限): {corner_4}")
         
         # 确保角点顺序正确：1,2,3,4
         corners_reordered = np.array([corner_1, corner_2, corner_3, corner_4])
@@ -1132,47 +1136,8 @@ class CubePoseEstimator:
         # 可视化坐标系（如果提供了rgb_img）
         if rgb_img is not None:
             try:
-                # 重新计算中心点和坐标轴
-                center = np.mean(valid_corners, axis=0)
-                
-                # 计算边长
-                edges = []
-                for i in range(4):
-                    pt1 = valid_corners[i]
-                    pt2 = valid_corners[(i+1) % 4]
-                    edge_length = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
-                    edges.append(edge_length)
-                
-                # 找到长边和短边
-                max_edge_length = max(edges)
-                min_edge_length = min(edges)
-                
-                # 找到长边的索引
-                long_edge_indices = []
-                for i, edge_length in enumerate(edges):
-                    if edge_length > (max_edge_length + min_edge_length) / 2:
-                        long_edge_indices.append(i)
-                
-                # 计算长边的方向向量
-                if len(long_edge_indices) > 0:
-                    long_edge_idx = long_edge_indices[0]
-                    long_edge_start = valid_corners[long_edge_idx]
-                    long_edge_end = valid_corners[(long_edge_idx + 1) % 4]
-                    long_edge_vec = np.array([long_edge_end[0] - long_edge_start[0], 
-                                             long_edge_end[1] - long_edge_start[1]])
-                    long_edge_vec = long_edge_vec / np.linalg.norm(long_edge_vec)
-                else:
-                    long_edge_vec = np.array([valid_corners[1][0] - valid_corners[0][0], 
-                                             valid_corners[1][1] - valid_corners[0][1]])
-                    long_edge_vec = long_edge_vec / np.linalg.norm(long_edge_vec)
-                
-                # Y轴方向向量（平行于长边方向）
-                y_axis_vec = long_edge_vec
-                
-                # X轴方向向量（垂直于Y轴）
-                x_axis_vec = np.array([-y_axis_vec[1], y_axis_vec[0]])
-                
-                # 调用坐标系可视化
+                # 直接使用_sort_corners_clockwise_from_top_left函数返回的坐标轴信息
+                # center, x_axis_vec, y_axis_vec已经在上面计算过了
                 axes_vis_path = self.visualize_coordinate_axes(rgb_img, center, x_axis_vec, y_axis_vec, output_dir, base_name)
                 print(f"坐标系可视化已保存到: {axes_vis_path}")
             except Exception as e:
@@ -1325,7 +1290,7 @@ class CubePoseEstimator:
         box_prompt_vis = self.visualize_box_prompt_result(rgb_img, box_prompt, selected_corners, box_prompt_vis_path)
         print(f"角点可视化已保存到: {box_prompt_vis_path}")
         
-        # 获取3D相机坐标
+        # 根据角点坐标获取深度信息，根据内参反算 相机坐标系下3D坐标
         result = self._get_corner_depths(selected_corners, depth_img)
         if result is None:
             return None, None
@@ -1346,18 +1311,77 @@ class CubePoseEstimator:
             [-half_width, half_height, 0]      # 左下
         ], dtype=np.float32)
         
-        # 求解刚体变换
-        R, t = self._solve_rigid_transform_svd(corners_3d_camera, corners_3d_object)
-        if R is None or t is None:
+        # 方法1: 使用SVD方法求解刚体变换（基于深度信息）
+        print(f"\n=== 方法1: SVD方法（基于深度信息）===")
+        R_svd, t_svd = self._solve_rigid_transform_svd(corners_3d_camera, corners_3d_object)
+        if R_svd is None or t_svd is None:
+            print("SVD方法失败")
             return None, None
-        print(f"旋转矩阵R:")
-        print(f"{R}")
         
-        # 计算上立面中心在相机坐标系中的位置
-        center_position = t  # 因为物体坐标系原点就是上立面中心
+        print(f"SVD方法旋转矩阵R:")
+        print(f"{R_svd}")
+        print(f"平移向量t: {t_svd}")
         
-        # 计算欧拉角
-        euler_angles = self._rotation_matrix_to_euler_angles(R)
+        # 计算SVD方法的欧拉角
+        euler_angles_svd = self._rotation_matrix_to_euler_angles(R_svd)
+        print(f"欧拉角 (roll, pitch, yaw): {euler_angles_svd}")
+        
+        # 方法2: 使用cv2.solvePnP方法（仅使用2D角点）
+        print(f"\n=== 方法2: cv2.solvePnP方法（仅使用2D角点）===")
+        try:
+            # 使用已有的相机内参
+            if self.K is None or self.dist_coeffs is None:
+                print("相机内参未初始化，跳过solvePnP方法")
+            else:
+                # 准备2D角点数据（需要是float32类型）
+                corners_2d_for_pnp = np.array(selected_corners, dtype=np.float32).reshape(-1, 1, 2)
+                
+                # 准备3D物体坐标（与SVD方法相同的坐标系）
+                corners_3d_object_for_pnp = corners_3d_object.astype(np.float32)
+                
+                # 使用solvePnP求解位姿
+                success, rvec, tvec = cv2.solvePnP(
+                    corners_3d_object_for_pnp, 
+                    corners_2d_for_pnp, 
+                    self.K, 
+                    self.dist_coeffs,
+                    flags=cv2.SOLVEPNP_ITERATIVE
+                )
+                
+                if success:
+                    # 将旋转向量转换为旋转矩阵
+                    R_pnp, _ = cv2.Rodrigues(rvec)
+                    
+                    print(f"solvePnP方法旋转矩阵R:")
+                    print(f"{R_pnp}")
+                    print(f"平移向量t: {tvec.flatten()}")
+                    
+                    # 计算solvePnP方法的欧拉角
+                    euler_angles_pnp = self._rotation_matrix_to_euler_angles(R_pnp)
+                    # print(f"solvePnP方法欧拉角 (roll, pitch, yaw): {euler_angles_pnp}")
+                    print(f"欧拉角 (roll, pitch, yaw): [{euler_angles_pnp[0]:.5f}, {euler_angles_pnp[1]:.5f}, {euler_angles_pnp[2]:.5f}]")
+                    
+                    # 比较两种方法的结果
+                    print(f"\n=== 两种方法结果比较 ===")
+                    print(f"平移向量差异 (SVD - solvePnP): {t_svd - tvec.flatten()}")
+                    
+                    # 计算旋转矩阵差异
+                    R_diff = np.linalg.norm(R_svd - R_pnp)
+                    print(f"旋转矩阵差异 (Frobenius范数): {R_diff:.6f}")
+                    
+                    # 计算欧拉角差异
+                    euler_diff = np.array(euler_angles_svd) - np.array(euler_angles_pnp)
+                    print(f"欧拉角差异 (roll, pitch, yaw): {euler_diff}")
+                    
+                else:
+                    print("solvePnP方法失败")
+                    
+        except Exception as e:
+            print(f"solvePnP方法出错: {e}")
+        
+        # 返回SVD方法的结果（保持原有接口不变）
+        center_position = t_svd  # 因为物体坐标系原点就是上立面中心
+        euler_angles = euler_angles_svd
         
         return center_position, euler_angles
 
