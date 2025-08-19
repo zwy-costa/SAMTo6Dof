@@ -184,6 +184,13 @@ def detect_aruco_markers(image_path, camera_matrix, dist_coeffs, target_ids,
                     rvec = rvecs[0][0]  # 旋转向量 (3x1)
                     tvec = tvecs[0][0]  # 平移向量 (3x1)
                     print("使用 estimatePoseSingleMarkers 获取位姿")
+                    
+                    # 对于estimatePoseSingleMarkers，也需要保存纠正后的corners用于一致性
+                    corners_reshaped = current_corners.reshape(-1, 1, 2).astype(np.float32)
+                    corners_undistorted = cv2.undistortPoints(corners_reshaped, camera_matrix, dist_coeffs)
+                    # undistortPoints返回的是归一化坐标，需要重新投影到像素坐标系
+                    corners_undistorted = corners_undistorted.reshape(-1, 2)
+                    corners_undistorted = corners_undistorted * np.array([camera_matrix[0, 0], camera_matrix[1, 1]]) + np.array([camera_matrix[0, 2], camera_matrix[1, 2]])
                 except AttributeError:
                     # 如果estimatePoseSingleMarkers不可用，使用solvePnP
                     marker_points = np.array([
@@ -193,19 +200,33 @@ def detect_aruco_markers(image_path, camera_matrix, dist_coeffs, target_ids,
                         [-marker_size/2, marker_size/2, 0]    # corner[3]: 左下角
                     ], dtype=np.float32)
                     
-                    # 使用solvePnP估计位姿
+                    # 对检测到的corners进行畸变纠正
+                    corners_reshaped = current_corners.reshape(-1, 1, 2).astype(np.float32)
+                    corners_undistorted = cv2.undistortPoints(corners_reshaped, camera_matrix, dist_coeffs)
+                    # undistortPoints返回的是归一化坐标，需要重新投影到像素坐标系
+                    corners_undistorted = corners_undistorted.reshape(-1, 2)
+                    corners_undistorted = corners_undistorted * np.array([camera_matrix[0, 0], camera_matrix[1, 1]]) + np.array([camera_matrix[0, 2], camera_matrix[1, 2]])
+                    
+                    # 验证畸变纠正效果
+                    validate_distortion_correction(
+                        current_corners.reshape(-1, 2), 
+                        corners_undistorted, 
+                        marker_id
+                    )
+                    
+                    # 使用solvePnP估计位姿（使用无畸变的corners）
                     success, rvec, tvec = cv2.solvePnP(
                         marker_points, 
-                        current_corners.astype(np.float32), 
+                        corners_undistorted, 
                         camera_matrix, 
-                        dist_coeffs
+                        None  # 使用无畸变的corners时，dist_coeffs设为None
                     )
                     
                     if not success:
                         print(f"位姿估计失败: solvePnP未收敛 (ID: {marker_id})")
                         continue
                     
-                    print("使用 solvePnP 获取位姿")
+                    print("使用 solvePnP 获取位姿（已纠正畸变）")
                     
             except Exception as e:
                 print(f"位姿估计失败: {e} (ID: {marker_id})")
@@ -228,7 +249,8 @@ def detect_aruco_markers(image_path, camera_matrix, dist_coeffs, target_ids,
             
             markers_info[marker_id] = {
                 'id': marker_id,
-                'corners': current_corners,
+                'corners': current_corners,  # 原始corners（有畸变）
+                'corners_undistorted': corners_undistorted,  # 纠正后的corners（无畸变）
                 'center': center,
                 'area': area,
                 'rvec': rvec,
@@ -318,6 +340,13 @@ def print_marker_info(marker_info, marker_name="标记"):
     # 标记几何信息
     area = marker_info['area']
     print(f"标记面积: {float(area)} 像素²")
+    
+    # 畸变纠正信息
+    corners_undistorted = marker_info.get('corners_undistorted', None)
+    if corners_undistorted is not None:
+        corners_orig = marker_info['corners'].reshape(-1, 2)
+        displacement = np.linalg.norm(corners_undistorted - corners_orig, axis=1)
+        print(f"畸变纠正位移: {[f'{d:.2f}' for d in displacement]} 像素")
     
     # 旋转信息
     rvec = marker_info['rvec'].flatten()
@@ -561,6 +590,35 @@ def main():
     # 可视化（如果需要）
     if args.visualize or args.output:
         visualize_dual_markers(args.image, markers_info, relative_pose, args.output)
+
+
+def validate_distortion_correction(corners_original, corners_undistorted, marker_id):
+    """
+    验证畸变纠正的效果
+    
+    Args:
+        corners_original: 原始corners（有畸变）
+        corners_undistorted: 纠正后的corners（无畸变）
+        marker_id: 标记ID
+    
+    Returns:
+        correction_info: 纠正信息字典
+    """
+    # 计算畸变纠正的位移
+    displacement = np.linalg.norm(corners_undistorted - corners_original, axis=1)
+    max_displacement = np.max(displacement)
+    mean_displacement = np.mean(displacement)
+    
+    print(f"\n=== 标记 {marker_id} 畸变纠正验证 ===")
+    print(f"最大位移: {max_displacement:.2f} 像素")
+    print(f"平均位移: {mean_displacement:.2f} 像素")
+    print(f"各角点位移: {[f'{d:.2f}' for d in displacement]}")
+    
+    return {
+        'max_displacement': max_displacement,
+        'mean_displacement': mean_displacement,
+        'displacement_per_corner': displacement.tolist()
+    }
 
 
 if __name__ == '__main__':
