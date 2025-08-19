@@ -46,8 +46,8 @@ def load_camera_params(json_file):
         ], dtype=np.float32)
         
         print(f"相机内参加载成功:")
-        print(f"  焦距: fx={intrinsic['fx']:.2f}, fy={intrinsic['fy']:.2f}")
-        print(f"  主点: cx={intrinsic['ppx']:.2f}, cy={intrinsic['ppy']:.2f}")
+        print(f"  焦距: fx={intrinsic['fx']}, fy={intrinsic['fy']}")
+        print(f"  主点: cx={intrinsic['ppx']}, cy={intrinsic['ppy']}")
         print(f"  畸变系数: {dist_coeffs}")
         
         return camera_matrix, dist_coeffs
@@ -315,33 +315,36 @@ def print_pose_info(pose_info):
     if len(center.shape) > 1:
         # 如果center是多个点的数组，计算平均值
         center = np.mean(center, axis=0)
-    print(f"中心点: ({float(center[0]):.2f}, {float(center[1]):.2f})")
+    print(f"中心点: ({float(center[0])}, {float(center[1])})")
     
     # 标记几何信息
     area = pose_info['area']
-    print(f"标记面积: {float(area):.2f} 像素²")
+    print(f"标记面积: {float(area)} 像素²")
     
     # 旋转信息
     rvec = pose_info['rvec'].flatten()
     R = pose_info['R']
-    print(f"\n旋转向量 (弧度): [{rvec[0]:.4f}, {rvec[1]:.4f}, {rvec[2]:.4f}]")
-    print(f"旋转矩阵 R (3x3):")
-    print(f"  [{R[0,0]:.6f}, {R[0,1]:.6f}, {R[0,2]:.6f}]")
-    print(f"  [{R[1,0]:.6f}, {R[1,1]:.6f}, {R[1,2]:.6f}]")
-    print(f"  [{R[2,0]:.6f}, {R[2,1]:.6f}, {R[2,2]:.6f}]")
+    tvec = pose_info['tvec'].flatten()
+
+    print(f"\n旋转向量 (弧度): [{rvec[0]}, {rvec[1]}, {rvec[2]}]")
+    print(f"旋转矩阵R:")
+    print(f"{R}")
+    # print(f"  [{R[0,0]}, {R[0,1]}, {R[0,2]}]")
+    # print(f"  [{R[1,0]}, {R[1,1]}, {R[1,2]}]")
+    # print(f"  [{R[2,0]}, {R[2,1]}, {R[2,2]}]")
     
     # 欧拉角
     euler = pose_info['euler_angles'].flatten()
-    print(f"欧拉角 (度): 绕X={euler[0]:.2f}, 绕Y={euler[1]:.2f}, 绕Z={euler[2]:.2f}")
+    print(f"平移向量t: [{tvec[0]}, {tvec[1]}, {tvec[2]}]")
+    # print(f"欧拉角 (roll, pitch, yaw): {euler[0]}, {euler[1]}, {euler[2]}")
+    print(f"欧拉角 (roll, pitch, yaw): [{euler[0]}, {euler[1]}, {euler[2]}]")
     
     # 平移信息
-    tvec = pose_info['tvec'].flatten()
-    print(f"\n平移向量 t (3x1): [{tvec[0]:.4f}, {tvec[1]:.4f}, {tvec[2]:.4f}]")
-    print(f"位置: X={tvec[0]:.4f}m, Y={tvec[1]:.4f}m, Z={tvec[2]:.4f}m")
+    # print(f"位置: X={tvec[0]}m, Y={tvec[1]}m, Z={tvec[2]}m")
     
     # 距离
     distance = pose_info['distance']
-    print(f"距离: {float(distance):.4f} 米")
+    print(f"距离: {float(distance)} 米")
     
     # 坐标系说明
     print(f"\n坐标系说明:")
@@ -354,9 +357,9 @@ def print_pose_info(pose_info):
     
     # 检测质量信息
     print(f"\n检测质量信息:")
-    print(f"  - 标记尺寸: {pose_info['marker_size']:.3f} 米")
-    print(f"  - 图像面积: {float(pose_info['area']):.1f} 像素²")
-    print(f"  - 检测距离: {float(pose_info['distance']):.3f} 米")
+    print(f"  - 标记尺寸: {pose_info['marker_size']} 米")
+    print(f"  - 图像面积: {float(pose_info['area'])} 像素²")
+    print(f"  - 检测距离: {float(pose_info['distance'])} 米")
     
     # 相机坐标系说明
     print(f"\n相机坐标系说明:")
@@ -378,15 +381,15 @@ def print_pose_info(pose_info):
     print(f"  - 角点坐标:")
     for i, corner in enumerate(corners):
         for j in range(len(corner)):
-            print(f"    角点{i+1}: ({float(corner[j][0]):.1f}, {float(corner[j][1]):.1f})")
+            print(f"    角点{i+1}: ({float(corner[j][0])}, {float(corner[j][1])})")
     
     # 总结信息
     print(f"\n=== 检测总结 ===")
     print(f"✓ 成功检测到ArUco标记 ID: {pose_info['id']}")
-    print(f"✓ 标记中心位置: ({float(center[0]):.1f}, {float(center[1]):.1f}) 像素")
-    print(f"✓ 3D位置: X={tvec[0]:.3f}m, Y={tvec[1]:.3f}m, Z={tvec[2]:.3f}m")
-    print(f"✓ 检测距离: {float(distance):.3f} 米")
-    print(f"✓ 标记尺寸: {pose_info['marker_size']:.3f} 米")
+    print(f"✓ 标记中心位置: ({float(center[0])}, {float(center[1])}) 像素")
+    print(f"✓ 3D位置: X={tvec[0]}m, Y={tvec[1]}m, Z={tvec[2]}m")
+    print(f"✓ 检测距离: {float(distance)} 米")
+    print(f"✓ 标记尺寸: {pose_info['marker_size']} 米")
     print("=" * 50)
 
 
@@ -531,20 +534,20 @@ def visualize_detection(image_path, pose_info, output_path=None):
     
     # 绘制位姿信息
     tvec = pose_info['tvec']
-    pose_text = f"Z: {float(tvec[2]):.3f}m"
+    pose_text = f"Z: {float(tvec[2])}m"
     cv2.putText(image, pose_text, 
                (int(center[0]) - 20, int(center[1]) + 20),
                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
     
     # 绘制更多信息
-    info_text = f"ID: {pose_info['id']} | Distance: {float(pose_info['distance']):.3f}m"
+    info_text = f"ID: {pose_info['id']} | Distance: {float(pose_info['distance'])}m"
     cv2.putText(image, info_text, 
                (10, image.shape[0] - 20),
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     
     # 绘制位姿详细信息
     tvec = pose_info['tvec'].flatten()
-    pose_detail = f"X:{tvec[0]:.3f}m Y:{tvec[1]:.3f}m Z:{tvec[2]:.3f}m"
+    pose_detail = f"X:{tvec[0]}m Y:{tvec[1]}m Z:{tvec[2]}m"
     cv2.putText(image, pose_detail, 
                (10, image.shape[0] - 40),
                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
