@@ -12,6 +12,7 @@ import argparse
 import os
 import matplotlib.pyplot as plt
 import matplotlib
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from typing import Optional, Tuple, Dict, Any, List
 import glob
 from pathlib import Path
@@ -219,6 +220,41 @@ def calculate_ground_truth_distance(marker1_id: int, marker2_id: int, squares_x:
     
     distance = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
     return distance
+
+
+def get_row_col_from_marker_id(marker_id: int, squares_x: int) -> Tuple[int, int]:
+    """
+    根据标记ID反推其在棋盘中的行(row)与列(col)
+    偶数行ID在偶数列，奇数行ID在奇数列
+    """
+    current_id = marker_id
+    row = 0
+    col_in_row = 0
+    while True:
+        if row % 2 == 0:
+            markers_in_this_row = (squares_x + 1) // 2
+        else:
+            markers_in_this_row = squares_x // 2
+        if current_id < markers_in_this_row:
+            col_in_row = current_id
+            break
+        current_id -= markers_in_this_row
+        row += 1
+    if row % 2 == 0:
+        col = col_in_row * 2
+    else:
+        col = col_in_row * 2 + 1
+    return row, col
+
+
+def get_marker_world_position(marker_id: int, squares_x: int, square_length: float) -> np.ndarray:
+    """
+    返回标记在世界坐标系中的中心点坐标 (x, y, z=0)
+    """
+    row, col = get_row_col_from_marker_id(marker_id, squares_x)
+    x = (col + 0.5) * square_length
+    y = (row + 0.5) * square_length
+    return np.array([x, y, 0.0], dtype=np.float32)
 
 
 def detect_aruco_markers(image_path, camera_matrix, dist_coeffs, dict_name='5x5_1000', marker_size=0.1):
@@ -489,127 +525,90 @@ def analyze_marker_errors(markers_info: Dict, squares_x: int, squares_y: int, sq
 
 
 def visualize_marker_errors(image_path: str, markers_info: Dict, error_analysis: Dict, 
-                           ref_marker_id: int, output_dir: str):
+                           ref_marker_id: int, output_dir: str, squares_x: int, square_length: float, bar_metric: str = 'rotation'):
     """
-    可视化单个标记的误差分析结果
-    
-    Args:
-        image_path: 图片路径
-        markers_info: 标记信息
-        error_analysis: 误差分析结果
-        ref_marker_id: 参考标记ID
-        output_dir: 输出目录
+    可视化单个标记的误差分析结果（3D版）
+    使用标定板世界坐标将ID放置在平面z=0上，并用线段显示与参考标记的误差
     """
     if ref_marker_id not in error_analysis:
         print(f"标记 {ref_marker_id} 没有误差分析数据")
         return
     
-    # 读取图片
-    image = cv2.imread(image_path)
-    if image is None:
-        print("无法读取图片进行可视化")
-        return
-    
-    # 创建图形
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    
-    # 绘制检测到的标记
-    try:
-        corners_list = []
-        ids_list = []
-        
-        for marker_id, marker_info in markers_info.items():
-            corners_list.append(marker_info['corners'])
-            ids_list.append([marker_id])
-        
-        # 绘制检测到的标记
-        cv2.aruco.drawDetectedMarkers(image, corners_list, np.array(ids_list))
-    except (AttributeError, cv2.error):
-        # 如果内置函数不可用，使用手动绘制
-        for marker_id, marker_info in markers_info.items():
-            corners = marker_info['corners'].astype(np.int32)
-            color = (0, 255, 0) if marker_id == ref_marker_id else (255, 0, 0)
-            cv2.polylines(image, [corners], True, color, 2)
-            
-            # 绘制标记ID
-            center = marker_info['center']
-            if len(center.shape) > 1:
-                center = np.mean(center, axis=0)
-            center = center.astype(np.int32)
-            cv2.putText(image, f"ID: {marker_id}", 
-                       (int(center[0]) - 20, int(center[1]) - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-    
-    # 绘制连接线和误差信息
+    # 创建3D图
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # 绘制所有标记在世界坐标系的中心点
     error_data = error_analysis[ref_marker_id]
-    for i, target_id in enumerate(error_data['target_markers']):
-        if target_id in markers_info:
-            ref_center = markers_info[ref_marker_id]['center']
-            target_center = markers_info[target_id]['center']
-            
-            if len(ref_center.shape) > 1:
-                ref_center = np.mean(ref_center, axis=0)
-            if len(target_center.shape) > 1:
-                target_center = np.mean(target_center, axis=0)
-            
-            ref_center = ref_center.astype(np.int32)
-            target_center = target_center.astype(np.int32)
-            
-            # 绘制连接线
-            cv2.line(image, tuple(ref_center), tuple(target_center), (255, 255, 0), 2)
-            
-            # 在连接线中点显示误差信息
-            mid_point = ((ref_center[0] + target_center[0]) // 2, (ref_center[1] + target_center[1]) // 2)
-            error_text = f"R:{error_data['rotation_errors'][i]:.2f}° D:{error_data['distance_errors'][i]:.3f}m"
-            cv2.putText(image, error_text, mid_point, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-    
-    # 转换BGR到RGB用于matplotlib显示
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    
-    # 绘制原图
-    ax1.imshow(image_rgb)
-    ax1.set_title(f'Marker {ref_marker_id} Error Analysis')
-    ax1.axis('off')
-    
-    # 绘制误差统计图
     target_markers = error_data['target_markers']
     rotation_errors = error_data['rotation_errors']
     distance_errors = error_data['distance_errors']
-    
-    x = np.arange(len(target_markers))
-    width = 0.35
-    
-    # 旋转误差柱状图
-    bars1 = ax2.bar(x - width/2, rotation_errors, width, label='Rotation Error (deg)', color='red', alpha=0.7)
-    ax2.set_xlabel('Target Marker ID')
-    ax2.set_ylabel('Error Value')
-    ax2.set_title(f'Marker {ref_marker_id} Error Statistics')
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(target_markers)
-    ax2.legend()
-    
-    # 添加数值标签
-    for bar in bars1:
-        height = bar.get_height()
-        ax2.text(bar.get_x() + bar.get_width() / 2, height, f'{height:.2f}',
-                 ha='center', va='bottom', fontsize=8, color='red')
-    
-    # 距离误差柱状图
-    bars2 = ax2.bar(x + width/2, distance_errors, width, label='Distance Error (m)', color='blue', alpha=0.7)
-    for bar in bars2:
-        height = bar.get_height()
-        ax2.text(bar.get_x() + bar.get_width() / 2, height, f'{height:.3f}',
-                 ha='center', va='bottom', fontsize=8, color='blue')
-    
-    ax2.legend()
+
+    # 从 markers_info 推断棋盘参数（需要主程序传入，故在外层管理）
+    # 这里不做推断，留由主程序在标题中展示
+
+    # 绘制所有检测到的标记（世界坐标）
+    world_points = {}
+    for marker_id in markers_info.keys():
+        pos = get_marker_world_position(marker_id, squares_x, square_length)
+        world_points[marker_id] = pos
+
+    # 散点图：所有标记
+    all_xyz = np.stack(list(world_points.values()), axis=0)
+    ax.scatter(all_xyz[:, 0], all_xyz[:, 1], all_xyz[:, 2], c='gray', s=30, label='All Markers')
+
+    # 高亮参考标记
+    ref_pos = world_points.get(ref_marker_id, None)
+    if ref_pos is not None:
+        ax.scatter([ref_pos[0]], [ref_pos[1]], [ref_pos[2]], c='red', s=80, label=f'Ref {ref_marker_id}')
+        ax.text(ref_pos[0], ref_pos[1], ref_pos[2], f"{ref_marker_id}", color='red')
+
+    # 用柱状高度表示误差，不画连线
+    # bar_metric: 'distance' 使用距离误差作高度；'rotation' 使用旋转误差作高度
+    for i, target_id in enumerate(target_markers):
+        tpos = world_points.get(target_id, None)
+        if tpos is None:
+            continue
+        height = distance_errors[i] if bar_metric == 'distance' else rotation_errors[i]
+        color = 'blue'
+        ax.bar3d(tpos[0]-0.5*square_length, tpos[1]-0.5*square_length, 0.0,
+                 0.6*square_length, 0.6*square_length, height,
+                 shade=True, color=color, alpha=0.8)
+        # 顶部标高文字（带单位）
+        label_txt = f"{height:.3f}m" if bar_metric == 'distance' else f"{height:.1f}°"
+        ax.text(tpos[0], tpos[1], height, label_txt, color=color, fontsize=8)
+        # 标注目标ID
+        ax.text(tpos[0], tpos[1], 0.0, f"{target_id}", color='black', fontsize=9)
+
+    # 轴设置
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    z_label = 'Z (m)' if bar_metric == 'distance' else 'Z (deg)'
+    ax.set_zlabel(z_label)
+    ax.set_title(f'Marker {ref_marker_id} Error Analysis (3D)')
+
+    # 设置平面范围（根据所有点自动扩展）
+    min_x, max_x = np.min(all_xyz[:,0]), np.max(all_xyz[:,0])
+    min_y, max_y = np.min(all_xyz[:,1]), np.max(all_xyz[:,1])
+    pad_x = max(1e-6, 0.5 * (max_x - min_x))
+    pad_y = max(1e-6, 0.5 * (max_y - min_y))
+    ax.set_xlim(min_x - pad_x, max_x + pad_x)
+    ax.set_ylim(min_y - pad_y, max_y + pad_y)
+
+    # 设置Z轴范围，避免柱状超出画面
+    vals = np.array(distance_errors if bar_metric == 'distance' else rotation_errors)
+    vmax = float(np.max(vals)) if len(vals) > 0 else 1.0
+    ax.set_zlim(0.0, vmax * 1.2 + 1e-6)
+
+    ax.legend(loc='upper right')
     fig.tight_layout()
-    
-    # 保存图像
-    output_path = Path(output_dir) / f'marker_{ref_marker_id}_errors.png'
+
+    # 输出保存
+    output_path = Path(output_dir) / f'marker_{ref_marker_id}_errors_3d.png'
     fig.savefig(str(output_path), dpi=200, bbox_inches='tight')
     plt.close(fig)
-    
-    # 保存统计结果为JSON
+
+    # 保持原先JSON统计输出
     stats = {
         'ref_marker_id': int(ref_marker_id),
         'target_markers': [int(t) for t in target_markers],
@@ -644,6 +643,7 @@ def main():
     parser.add_argument('--squares-y', type=int, default=10, help='标定板Y方向方格数')
     parser.add_argument('--square-length', type=float, default=0.03, help='标定板方格边长(米)')
     parser.add_argument('--output-dir', default=None, help='输出目录，默认在output下根据图片名创建')
+    parser.add_argument('--bar-metric', default='rotation', choices=['distance','rotation'], help='3D柱状高度表示的误差类型')
     args = parser.parse_args()
 
     # 检查输入
@@ -674,9 +674,12 @@ def main():
     # 误差分析
     error_analysis = analyze_marker_errors(markers_info, args.squares_x, args.squares_y, args.square_length)
 
-    # 为每个标记生成图像与统计
+    # 可视化度量选择：'distance' 或 'rotation'
+    bar_metric = args.bar_metric
+    
+    # 为每个标记生成3D图像与统计
     for ref_marker_id in markers_info.keys():
-        visualize_marker_errors(args.image, markers_info, error_analysis, ref_marker_id, str(out_dir))
+        visualize_marker_errors(args.image, markers_info, error_analysis, ref_marker_id, str(out_dir), args.squares_x, args.square_length, bar_metric=bar_metric)
 
     # 保存整体结果
     summary_path = out_dir / 'summary.json'
