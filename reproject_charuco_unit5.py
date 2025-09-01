@@ -296,31 +296,75 @@ def _rotation_matrix_to_euler_angles(rvec_a: np.ndarray, rvec_b: np.ndarray) -> 
 
 
 def _solve_candidates_ippe(objp: np.ndarray, imgp: np.ndarray, K: np.ndarray, D: np.ndarray) -> List[Tuple[np.ndarray, np.ndarray]]:
-	flag = getattr(cv2, 'SOLVEPNP_IPPE_SQUARE', cv2.SOLVEPNP_ITERATIVE)
-	# try:
-	# 	retval, rvecs, tvecs, reproj = cv2.solvePnPGeneric(objp, imgp, K, D, flags=flag)
-	# 	cands = []
-	# 	for rv, tv in zip(rvecs, tvecs):
-	# 		cands.append((rv, tv))
-	# 	return cands
-	# except Exception:
-	# 	# fallback single solution
-	# ok, rvec, tvec = cv2.solvePnP(objp, imgp, K, D, flags=flag)
-	# return [(rvec, tvec)] if ok else []
-	ok, rvec, tvec, inliers = cv2.solvePnPRansac(objp, imgp, K, D,
-		flags=cv2.SOLVEPNP_ITERATIVE, iterationsCount=200, reprojectionError=2.5, confidence=0.99)
-	if (not ok) or (inliers is None) or (len(inliers) < 4):
-		ok2, rvec2, tvec2 = cv2.solvePnP(objp, imgp, K, D, flags=flag)
-		return [(rvec2, tvec2)] if ok2 else []
-	# refine on inliers
-	try:
-		inl = inliers.reshape(-1)
-		obj_inl = objp[inl]
-		img_inl = imgp[inl]
-		rvec, tvec = cv2.solvePnPRefineLM(obj_inl, img_inl, K, D, rvec, tvec)
-	except Exception:
-		pass
-	return [(rvec, tvec)] if ok else []
+	"""返回候选位姿列表；
+	- 若恰好4点：使用 IPPE_SQUARE 的 solvePnPGeneric 产出候选→可见性与重投影误差筛选→对最佳一次 LM 精修；
+	- 若多于4点：使用 ITERATIVE 的 solvePnPGeneric（若可用）或回退 RANSAC 初值→一次 LM 精修；
+	"""
+	cands: List[Tuple[np.ndarray, np.ndarray]] = []
+	N = int(objp.shape[0]) if objp is not None else 0
+	if N == 4:
+		# 4点：IPPE多解
+		flag = getattr(cv2, 'SOLVEPNP_IPPE_SQUARE', cv2.SOLVEPNP_ITERATIVE)
+		try:
+			retval, rvecs, tvecs, reproj = cv2.solvePnPGeneric(objp, imgp, K, D, flags=flag)
+			if retval and rvecs is not None and tvecs is not None:
+				for rv, tv in zip(rvecs, tvecs):
+					cands.append((rv, tv))
+		except Exception:
+			pass
+		# 若无候选，则回退一次常规 solvePnP
+		if not cands:
+			ok, rvec, tvec = cv2.solvePnP(objp, imgp, K, D, flags=flag)
+			return [(rvec, tvec)] if ok else []
+		# 候选筛选：正深度与最小重投影误差
+		best: Tuple[bool, np.ndarray, np.ndarray, float] = (False, None, None, float('inf'))
+		for rv, tv in cands:
+			if not _cheirality_ok(objp, rv, tv):
+				continue
+			err = _mean_reproj_error(objp, imgp, rv, tv, K, D)
+			if not np.isfinite(err):
+				continue
+			if err < best[3]:
+				best = (True, rv, tv, float(err))
+		if not best[0]:
+			return []
+		# 对最佳候选进行一次 LM 精修
+		try:
+			rref, tref = cv2.solvePnPRefineLM(objp, imgp, K, D, best[1], best[2])
+			return [(rref, tref)]
+		except Exception:
+			return [(best[1], best[2])]
+	else:
+		# N != 4：使用 ITERATIVE 的 Generic（若可用），否则回退 RANSAC，再 LM 精修
+		try:
+			retval, rvecs, tvecs, reproj = cv2.solvePnPGeneric(objp, imgp, K, D, flags=cv2.SOLVEPNP_ITERATIVE)
+			if retval and rvecs is not None and tvecs is not None and len(rvecs) > 0:
+				rb, tb = rvecs[0], tvecs[0]
+				try:
+					rref, tref = cv2.solvePnPRefineLM(objp, imgp, K, D, rb, tb)
+					return [(rref, tref)]
+				except Exception:
+					return [(rb, tb)]
+		except Exception:
+			pass
+		# 回退：RANSAC 初值
+		ok, rvec_b, tvec_b, inliers = cv2.solvePnPRansac(
+			objp, imgp, K, D,
+			flags=cv2.SOLVEPNP_ITERATIVE, iterationsCount=200, reprojectionError=2.5, confidence=0.99
+		)
+		if (not ok) or (inliers is None) or (len(inliers) < 4):
+			# 最后回退：一次 ITERATIVE 解
+			ok2, rvec2, tvec2 = cv2.solvePnP(objp, imgp, K, D, flags=cv2.SOLVEPNP_ITERATIVE)
+			return [(rvec2, tvec2)] if ok2 else []
+		# 基于内点的 LM 精修
+		try:
+			inl = inliers.reshape(-1)
+			obj_inl = objp[inl]
+			img_inl = imgp[inl]
+			rref, tref = cv2.solvePnPRefineLM(obj_inl, img_inl, K, D, rvec_b, tvec_b)
+			return [(rref, tref)]
+		except Exception:
+			return [(rvec_b, tvec_b)]
 
 
 def estimate_marker_pose_from_corners(corners_2d: np.ndarray,
@@ -503,7 +547,11 @@ def estimate_marker_pose_from_five_markers(center_id: int,
 		marker_length_mm: float,
 		camera_matrix: np.ndarray,
 		dist_coeffs: np.ndarray) -> Tuple[bool, np.ndarray, np.ndarray, List[int]]:
-	"""使用中心id及其四邻居(共5个id)的所有角点，先估计board→camera的姿态，再平移到该id中心，返回(center_rvec, center_tvec)。"""
+	"""使用中心id及其四邻居(共5个id)的所有角点：
+	1) 组装所有角点的 3D-2D 对；
+	2) 用 _solve_candidates_ippe(obj,img,K,D) 走 Generic→筛选→LM 流程得到 (rvec_b, tvec_b)；
+	3) 将位姿平移到该中心 id 的中心；
+	返回(center_rvec, center_tvec)。"""
 	if ids is None or len(ids) == 0:
 		return False, None, None, []
 	# id 到 corners 索引
@@ -524,24 +572,17 @@ def estimate_marker_pose_from_five_markers(center_id: int,
 		object_points.append(c3d)
 		used.append(int(mid))
 	if len(object_points) < 5:
-		return False, None, None, used, None, None
+		return False, None, None, used
 	obj = np.concatenate(object_points, axis=0)
 	img = np.concatenate(image_points, axis=0)
-	ok, rvec_b, tvec_b, inliers = cv2.solvePnPRansac(obj, img, camera_matrix, dist_coeffs,
-		flags=cv2.SOLVEPNP_ITERATIVE, iterationsCount=200, reprojectionError=2.5, confidence=0.99)
-	inl = inliers.reshape(-1)
-	obj_inl = obj[inl]
-	img_inl = img[inl]
-	try:
-		rvec2, tvec2 = cv2.solvePnPRefineLM(obj_inl, img_inl, camera_matrix, dist_coeffs, rvec_b, tvec_b)
-	except Exception:
-		print("solvePnPRefineLM failed")
-		return False, None, None, used, None, None
-	if not ok:
-		return False, None, None, used, None, None
+	# 使用 Generic→筛选→LM 的统一流程
+	cands = _solve_candidates_ippe(obj, img, camera_matrix, dist_coeffs)
+	if not cands:
+		return False, None, None, used
+	rvec_b, tvec_b = cands[0]
 	# 平移到该marker中心
-	rv_center, tv_center = compute_board_translated_pose_for_marker(center_id, rvec2, tvec2, square_length_mm)
-	return True, rv_center, tv_center, used, rvec2, tvec2
+	rv_center, tv_center = compute_board_translated_pose_for_marker(center_id, rvec_b, tvec_b, square_length_mm)
+	return True, rv_center, tv_center, used
 
 
 def main():
@@ -650,12 +691,12 @@ def main():
 	print("\n=== 五标记联合估计(以中心为原点) ===")
 	per_marker_rt: Dict[int, Dict[str, np.ndarray]] = {}
 	for center_id in ids.flatten().tolist():
-		ok_c, rvc, tvc, used5, rvec2, tvec2 = estimate_marker_pose_from_five_markers(
+		ok_c, rvc, tvc, used5 = estimate_marker_pose_from_five_markers(
 			int(center_id), image, corners, ids, square_length_mm, marker_length_mm, camera_matrix, dist_coeffs
 		)
 		if not ok_c:
 			continue
-		per_marker_rt[int(center_id)] = {'rvec': rvc, 'tvec': tvc, 'used_ids': used5, 'rvec2': rvec2, 'tvec2': tvec2}
+		per_marker_rt[int(center_id)] = {'rvec': rvc, 'tvec': tvc, 'used_ids': used5}
 	print(f"共 {len(per_marker_rt)} 个中心使用5标记估计成功")
 
 	# ======= 3. 每个二维码的RT与  单标记 RT 与 基于标定板平移后的 RT 做差值 =======
