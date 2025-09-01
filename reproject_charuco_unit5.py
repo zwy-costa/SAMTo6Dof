@@ -95,22 +95,11 @@ def estimate_board_pose_all_corners(image: np.ndarray,
 		return False, None, None, used_ids, None, None
 	object_points = np.concatenate(object_points, axis=0)  # (N*4, 3)
 	image_points = np.concatenate(image_points, axis=0)    # (N*4, 2)
-	# RANSAC to remove outliers
-	ok, rvec, tvec, inliers = cv2.solvePnPRansac(object_points, image_points, camera_matrix, dist_coeffs,
-		flags=cv2.SOLVEPNP_ITERATIVE, iterationsCount=200, reprojectionError=2.5, confidence=0.99)
-	print(f"RANSAC ok: {ok}, inliers: {len(inliers)}")
-	if not ok or inliers is None or len(inliers) < 8:
-		# fallback to iterative
-		ok2, rvec2, tvec2 = cv2.solvePnP(object_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
-		return ok2, rvec2, tvec2, used_ids, object_points, image_points
-	# refine on inliers
-	inl = inliers.reshape(-1)
-	obj_inl = object_points[inl]
-	img_inl = image_points[inl]
-	try:
-		rvec, tvec = cv2.solvePnPRefineLM(obj_inl, img_inl, camera_matrix, dist_coeffs, rvec, tvec)
-	except Exception:
-		pass
+	# 统一流程：Generic→筛选→LM
+	cands = _solve_candidates_ippe(object_points, image_points, camera_matrix, dist_coeffs)
+	if not cands:
+		return False, None, None, used_ids, object_points, image_points
+	rvec, tvec = cands[0]
 	return True, rvec, tvec, used_ids, object_points, image_points
 
 
@@ -145,20 +134,11 @@ def estimate_board_pose_centers(image: np.ndarray,
 		return False, None, None, used_ids, None, None
 	object_points = np.array(object_points)
 	image_points = np.array(image_points)
-	ok, rvec, tvec, inliers = cv2.solvePnPRansac(object_points, image_points, camera_matrix, dist_coeffs,
-		flags=cv2.SOLVEPNP_ITERATIVE, iterationsCount=200, reprojectionError=2.5, confidence=0.99)
-	print(f"RANSAC ok: {ok}, inliers: {len(inliers)}")
-	if not ok or inliers is None or len(inliers) < 4:
-		ok2, rvec2, tvec2 = cv2.solvePnP(object_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
-		return ok2, rvec2, tvec2, used_ids, object_points, image_points
-	# refine
-	inl = inliers.reshape(-1)
-	obj_inl = object_points[inl]
-	img_inl = image_points[inl]
-	try:
-		rvec, tvec = cv2.solvePnPRefineLM(obj_inl, img_inl, camera_matrix, dist_coeffs, rvec, tvec)
-	except Exception:
-		pass
+	# 统一流程：Generic→筛选→LM
+	cands = _solve_candidates_ippe(object_points, image_points, camera_matrix, dist_coeffs)
+	if not cands:
+		return False, None, None, used_ids, object_points, image_points
+	rvec, tvec = cands[0]
 	return True, rvec, tvec, used_ids, object_points, image_points
 
 
