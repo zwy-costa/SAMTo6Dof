@@ -273,7 +273,6 @@ def _normal_angle_deg_unoriented(rvec_a: np.ndarray, rvec_b: np.ndarray) -> floa
 	ang = _normal_angle_deg(rvec_a, rvec_b)
 	return float(min(ang, 180.0 - ang))
 
-
 def _rotation_matrix_to_euler_angles(rvec_a: np.ndarray, rvec_b: np.ndarray) -> np.ndarray:
 	Ra, _ = cv2.Rodrigues(rvec_a)
 	Rb, _ = cv2.Rodrigues(rvec_b)
@@ -310,17 +309,17 @@ def _solve_candidates_ippe(objp: np.ndarray, imgp: np.ndarray, K: np.ndarray, D:
 	ok, rvec, tvec, inliers = cv2.solvePnPRansac(objp, imgp, K, D,
 		flags=cv2.SOLVEPNP_ITERATIVE, iterationsCount=200, reprojectionError=2.5, confidence=0.99)
 	if (not ok) or (inliers is None) or (len(inliers) < 4):
-		ok2, rvec2, tvec2 = cv2.solvePnP(objp, imgp, K, D, flags=flag)
+		ok2, rvec2, tvec2 = cv2.solvePnP(objp, imgp, K, D, flags=cv2.SOLVEPNP_ITERATIVE)
 		return [(rvec2, tvec2)] if ok2 else []
 	# refine on inliers
 	try:
 		inl = inliers.reshape(-1)
 		obj_inl = objp[inl]
 		img_inl = imgp[inl]
-		rvec, tvec = cv2.solvePnPRefineLM(obj_inl, img_inl, K, D, rvec, tvec)
+		rvec2, tvec2 = cv2.solvePnPRefineLM(obj_inl, img_inl, K, D, rvec, tvec)
 	except Exception:
 		pass
-	return [(rvec, tvec)] if ok else []
+	return [(rvec2, tvec2)] if ok else []
 
 
 def estimate_marker_pose_from_corners(corners_2d: np.ndarray,
@@ -352,32 +351,116 @@ def estimate_marker_pose_from_corners(corners_2d: np.ndarray,
 	if best[0]:
 		try:
 			rref, tref = cv2.solvePnPRefineLM(objp_base, imgp_full, camera_matrix, dist_coeffs, best[1], best[2])
+			R, _ = cv2.Rodrigues(rref)
+			euler_angles = rotation_matrix_to_euler_angles(R)
+			print(f"euler_angles: {euler_angles}")
 			err_ref = _mean_reproj_error(objp_base, imgp_full, rref, tref, camera_matrix, dist_coeffs)
 			return True, rref, tref, float(err_ref)
 		except Exception:
 			return best
 	return best
 
+def rotation_matrix_to_euler_angles(R):
+    """将旋转矩阵转换为欧拉角 (ZYX顺序)"""
+    sy = np.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
+    
+    singular = sy < 1e-6
+    
+    if not singular:
+        x = np.arctan2(R[2, 1], R[2, 2])
+        y = np.arctan2(-R[2, 0], sy)
+        z = np.arctan2(R[1, 0], R[0, 0])
+    else:
+        x = np.arctan2(-R[1, 2], R[1, 1])
+        y = np.arctan2(-R[2, 0], sy)
+        z = 0
+    
+    # 转换为度
+    euler_angles = np.array([x, y, z]) * 180 / np.pi
+    return euler_angles
 
-def estimate_all_markers_poses_from_corners(corners: List[np.ndarray],
+def estimate_markers_poses_from_4corners(center_id: int,
+		corners: List[np.ndarray],
 		ids: np.ndarray,
+		square_length_mm: float,
 		marker_length_mm: float,
 		camera_matrix: np.ndarray,
-		dist_coeffs: np.ndarray) -> Dict[int, Dict[str, np.ndarray]]:
+		dist_coeffs: np.ndarray) -> Tuple[bool, np.ndarray, np.ndarray, float]:
 	"""
-	Compute per-marker pose from its own 4 corners only, using board-translated pose as prior if provided.
-	Returns dict[id] -> {'rvec':..., 'tvec':..., 'reproj_err_px':...}
+	基于“周围四个二维码的四个角点”来估计单个中心标记(center_id)的位姿：
+	- 对于 center_id，对应四个对角邻居分别取其“内侧角”（靠近 center_id 的角）作为四个2D点：
+	  TL邻居→其右下角(index=2)，TR邻居→其左下角(index=3)，BR邻居→其左上角(index=0)，BL邻居→其右上角(index=1)。
+	- 将上述四个2D点与 center_id 的四个“虚拟角点”3D坐标一一对应，该虚拟方形的半边长为 square_length_mm + marker_length_mm/2。
+	返回: (ok, rvec, tvec, reproj_err_px)
 	"""
-	results: Dict[int, Dict[str, np.ndarray]] = {}
 	if ids is None or len(ids) == 0:
-		return results
-	for i, marker_id in enumerate(ids.flatten().tolist()):
-		c2d = corners[i].reshape(4, 2).astype(np.float32)
-		ok, rvec, tvec, err = estimate_marker_pose_from_corners(c2d, marker_length_mm, camera_matrix, dist_coeffs)
-		if not ok:
+		return False, None, None, float('inf')
+	# 构建: id -> corners索引
+	id_to_idx: Dict[int, int] = {}
+	for i, mid in enumerate(ids.flatten().tolist()):
+		id_to_idx[int(mid)] = i
+	# 若 center_id 未检测到，返回失败
+	if int(center_id) not in id_to_idx:
+		return False, None, None, float('inf')
+	# 构建: (row,col) -> id，仅针对当前检测到的id
+	rc_to_id: Dict[Tuple[int, int], int] = {}
+	for mid in id_to_idx.keys():
+		row, col = get_marker_grid_coords(int(mid))
+		rc_to_id[(row, col)] = int(mid)
+	row_c, col_c = get_marker_grid_coords(int(center_id))
+	# 四个对角邻居在网格中的(row,col)
+	rc_tl = (row_c - 1, col_c - 1)
+	rc_tr = (row_c - 1, col_c + 1)
+	rc_bl = (row_c + 1, col_c - 1)
+	rc_br = (row_c + 1, col_c + 1)
+	# 必须四个都存在
+	if rc_tl not in rc_to_id or rc_tr not in rc_to_id or rc_bl not in rc_to_id or rc_br not in rc_to_id:
+		return False, None, None, float('inf')
+	id_tl = rc_to_id[rc_tl]
+	id_tr = rc_to_id[rc_tr]
+	id_bl = rc_to_id[rc_bl]
+	id_br = rc_to_id[rc_br]
+	# 取四个邻居的“内侧角”作为中心id的TL、TR、BR、BL四点的2D观测
+	# OpenCV aruco角点顺序: 0=TL, 1=TR, 2=BR, 3=BL（以图像坐标为准）
+	idx_tl = id_to_idx[id_tl]
+	idx_tr = id_to_idx[id_tr]
+	idx_bl = id_to_idx[id_bl]
+	idx_br = id_to_idx[id_br]
+	c_tl = corners[idx_tl].reshape(4, 2).astype(np.float32)[0]  # TL邻居的左上角 → 中心的TL
+	c_tr = corners[idx_tr].reshape(4, 2).astype(np.float32)[1]  # TR邻居的右上角 → 中心的TR
+	c_br = corners[idx_br].reshape(4, 2).astype(np.float32)[2]  # BR邻居的右下角 → 中心的BR
+	c_bl = corners[idx_bl].reshape(4, 2).astype(np.float32)[3]  # BL邻居的左下角 → 中心的BL
+	imgp_full = np.stack([c_tl, c_tr, c_br, c_bl], axis=0).astype(np.float32)
+	# 构造中心id的“虚拟方形”四个3D角点（原点在中心id），半边长依据几何推导
+	h = (float(square_length_mm)) + (float(marker_length_mm) / 2.0)
+	objp_base = np.array([
+		[-h, -h, 0.0],  # TL
+		[ h, -h, 0.0],  # TR
+		[ h,  h, 0.0],  # BR
+		[-h,  h, 0.0],  # BL
+	], dtype=np.float32)
+	# 使用IPPE候选+LM精修（与单标记一致的稳健流程）
+	cands = _solve_candidates_ippe(objp_base, imgp_full, camera_matrix, dist_coeffs)
+	best = (False, None, None, float('inf'))
+	best_key = (float('inf'), float('inf'))
+	for rvec_c, tvec_c in cands:
+		if not _cheirality_ok(objp_base, rvec_c, tvec_c):
 			continue
-		results[int(marker_id)] = {'rvec': rvec, 'tvec': tvec, 'reproj_err_px': float(err)}
-	return results
+		err = _mean_reproj_error(objp_base, imgp_full, rvec_c, tvec_c, camera_matrix, dist_coeffs)
+		if not np.isfinite(err):
+			continue
+		key = (0.0, err)
+		if key < best_key:
+			best_key = key
+			best = (True, rvec_c, tvec_c, err)
+	if best[0]:
+		try:
+			rref, tref = cv2.solvePnPRefineLM(objp_base, imgp_full, camera_matrix, dist_coeffs, best[1], best[2])
+			err_ref = _mean_reproj_error(objp_base, imgp_full, rref, tref, camera_matrix, dist_coeffs)
+			return True, rref, tref, float(err_ref)
+		except Exception:
+			return best
+	return best
 
 
 def compute_board_translated_pose_for_marker(marker_id: int,
@@ -477,73 +560,6 @@ def compute_board_translated_pose_for_marker_oriented(marker_id: int,
 	return rvec_adj.reshape(3, 1), tvec_bm.reshape(3, 1), float(best_theta)
 
 
-def _neighbor_ids_for_center(center_id: int, ids: np.ndarray) -> List[int]:
-	"""根据中心id与检测到的ids，选出其周围的4个邻居(左上、右上、左下、右下)与自身，共5个id。"""
-	row_c, col_c = get_marker_grid_coords(center_id)
-	candidates = [(row_c - 1, col_c - 1), (row_c - 1, col_c + 1), (row_c + 1, col_c - 1), (row_c + 1, col_c + 1)]
-	# 构建已检测id的(row,col)索引
-	rc_of_id: Dict[int, Tuple[int, int]] = {}
-	if ids is not None and len(ids) > 0:
-		for mid in ids.flatten().tolist():
-			rc_of_id[int(mid)] = get_marker_grid_coords(int(mid))
-	sel = [center_id]
-	for rc in candidates:
-		for mid, rc_val in rc_of_id.items():
-			if rc_val == rc:
-				sel.append(mid)
-				break
-	return sel
-
-
-def estimate_marker_pose_from_five_markers(center_id: int,
-		image: np.ndarray,
-		corners: List[np.ndarray],
-		ids: np.ndarray,
-		square_length_mm: float,
-		marker_length_mm: float,
-		camera_matrix: np.ndarray,
-		dist_coeffs: np.ndarray) -> Tuple[bool, np.ndarray, np.ndarray, List[int]]:
-	"""使用中心id及其四邻居(共5个id)的所有角点，先估计board→camera的姿态，再平移到该id中心，返回(center_rvec, center_tvec)。"""
-	if ids is None or len(ids) == 0:
-		return False, None, None, []
-	# id 到 corners 索引
-	id_to_idx: Dict[int, int] = {}
-	for i, mid in enumerate(ids.flatten().tolist()):
-		id_to_idx[int(mid)] = i
-	selected_ids = _neighbor_ids_for_center(center_id, ids)
-	object_points = []
-	image_points = []
-	used = []
-	for mid in selected_ids:
-		idx = id_to_idx.get(int(mid), None)
-		if idx is None:
-			continue
-		c2d = corners[idx].reshape(4, 2).astype(np.float32)
-		c3d = build_board_marker_corners_3d(int(mid), square_length_mm, marker_length_mm)
-		image_points.append(c2d)
-		object_points.append(c3d)
-		used.append(int(mid))
-	if len(object_points) < 5:
-		return False, None, None, used, None, None
-	obj = np.concatenate(object_points, axis=0)
-	img = np.concatenate(image_points, axis=0)
-	ok, rvec_b, tvec_b, inliers = cv2.solvePnPRansac(obj, img, camera_matrix, dist_coeffs,
-		flags=cv2.SOLVEPNP_ITERATIVE, iterationsCount=200, reprojectionError=2.5, confidence=0.99)
-	inl = inliers.reshape(-1)
-	obj_inl = obj[inl]
-	img_inl = img[inl]
-	try:
-		rvec2, tvec2 = cv2.solvePnPRefineLM(obj_inl, img_inl, camera_matrix, dist_coeffs, rvec_b, tvec_b)
-	except Exception:
-		print("solvePnPRefineLM failed")
-		return False, None, None, used, None, None
-	if not ok:
-		return False, None, None, used, None, None
-	# 平移到该marker中心
-	rv_center, tv_center = compute_board_translated_pose_for_marker(center_id, rvec2, tvec2, square_length_mm)
-	return True, rv_center, tv_center, used, rvec2, tvec2
-
-
 def main():
 	parser = argparse.ArgumentParser(description='Estimate Charuco-like board pose and reproject markers')
 	parser.add_argument('--image', required=True, help='Input image path')
@@ -604,7 +620,7 @@ def main():
 	else:
 		print("❌ 角点方法失败")
 		return
-	
+
 	print("\n=== 中心点方法 ===")
 	success2, rvec2, tvec2, used_ids2, object_points2, image_points2 = estimate_board_pose_centers(
 		image, corners, ids, square_length_mm, marker_length_mm, camera_matrix, dist_coeffs
@@ -642,23 +658,31 @@ def main():
 	else:
 		print("❌ 中心点方法失败")
 		return
-	
+
 	# 使用角点方法的结果进行可视化（更准确）
 	success, rvec, tvec, used_ids, object_points, image_points = success1, rvec1, tvec1, used_ids1, object_points1, image_points1
 
-	# ======= 2. 基于“中心及其四邻居”的5个二维码角点，为每个中心id估计该中心位姿（以中心为原点） =======
-	print("\n=== 五标记联合估计(以中心为原点) ===")
+	# ======= 2. 使用每个二维码对应的四个角点输入SolvePnP计算每个二维码RT =======
+	# 基于四角点的单标记RT（中心为原点）
+	print("\n=== 单标记四角点位姿（以该标记中心为原点，相机坐标系下） ===")
 	per_marker_rt: Dict[int, Dict[str, np.ndarray]] = {}
 	for center_id in ids.flatten().tolist():
-		ok_c, rvc, tvc, used5, rvec2, tvec2 = estimate_marker_pose_from_five_markers(
-			int(center_id), image, corners, ids, square_length_mm, marker_length_mm, camera_matrix, dist_coeffs
+		ok_one, rvc, tvc, errc = estimate_markers_poses_from_4corners(
+			int(center_id), corners, ids, square_length_mm, marker_length_mm, camera_matrix, dist_coeffs
 		)
-		if not ok_c:
+		if not ok_one:
 			continue
-		per_marker_rt[int(center_id)] = {'rvec': rvc, 'tvec': tvc, 'used_ids': used5, 'rvec2': rvec2, 'tvec2': tvec2}
-	print(f"共 {len(per_marker_rt)} 个中心使用5标记估计成功")
+		per_marker_rt[int(center_id)] = {'rvec': rvc, 'tvec': tvc, 'reproj_err_px': float(errc)}
+	print(f"共 {len(per_marker_rt)} 个标记估计成功")
+	for mid in sorted(per_marker_rt.keys()):
+		pm = per_marker_rt[mid]
+		tvec = pm['tvec'].reshape(3)
+		rvec = pm['rvec'].reshape(3)
+		re = pm['reproj_err_px']
+		print(f"ID {mid:2d}: T=({tvec[0]:7.1f},{tvec[1]:7.1f},{tvec[2]:7.1f}) mm, R=({rvec[0]:.3f},{rvec[1]:.3f},{rvec[2]:.3f}) rad, reproj={re:.2f}px")
 
-	# ======= 3. 每个二维码的RT与  单标记 RT 与 基于标定板平移后的 RT 做差值 =======
+	# ======= 3. 每个二维码的RT与 
+	# 单标记 RT 与 基于标定板平移后的 RT 做差值
 	print("\n=== 单标记RT vs 板平移RT 差值 ===")
 	delta_t_list = []
 	delta_angle_list = []
@@ -667,7 +691,7 @@ def main():
 		pm = per_marker_rt[mid]
 		rvec_m = pm['rvec'].reshape(3, 1)
 		tvec_m = pm['tvec'].reshape(3, 1)
-		# *_bm 使用所有标定板的角点求出来的RT求某二维码中心在相机坐标系下的位姿, *_m 使用该方法（5标记联合）得到的中心位姿
+		# *_bm 使用所有标定板的角点求出来的RT求某二维码中心在相机坐标系下的位姿, *_m 使用该二维码的四个角点求出来的RT(即该二维码中心在相机坐标系下的位姿)，两个位姿做差对比
 		# Compare against pure board-translated pose without using this marker's image corners
 		rvec_bm, tvec_bm = compute_board_translated_pose_for_marker(mid, rvec1, tvec1, square_length_mm)
 		dt = (tvec_m - tvec_bm).reshape(3)
