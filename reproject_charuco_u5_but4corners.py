@@ -595,8 +595,9 @@ def main():
 	)
 	if success1:
 		R1, _ = cv2.Rodrigues(rvec1)
+		euler_angles = rotation_matrix_to_euler_angles(R1)
 		dist1 = float(np.linalg.norm(tvec1))
-		print(f"✅ 角点方法成功 - 距离: {dist1:.1f} mm")
+		print(f"✅ 角点方法成功 - 距离: {dist1:.1f} mm, 欧拉角: {euler_angles}")
 		
 		# 计算重投影误差 - 使用标记中心点进行公平比较
 		center_errors1 = []
